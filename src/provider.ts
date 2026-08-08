@@ -21,6 +21,13 @@ import {
   descriptorToInformation,
   type QoderModelInformation,
 } from './modelInformation.js';
+import {
+  hasOnlyNativeReadFileTool,
+  isNativeToolCallId,
+  latestNativeToolResult,
+  NativeQoderSession,
+  type NativeSessionBoundary,
+} from './nativeToolLoop.js';
 import { TokenStore } from './tokenStore.js';
 
 const CATALOG_CACHE_TTL_MS = 5 * 60 * 1000;
@@ -80,6 +87,7 @@ export class QoderModelProvider
   private cacheExpiresAt = 0;
   private inFlight: Promise<CatalogLoadResult> | undefined;
   private readonly metadataSession = new QoderMetadataSession();
+  private readonly nativeSessions = new Map<string, NativeQoderSession>();
 
   public readonly onDidChangeLanguageModelChatInformation =
     this.changeEmitter.event;
@@ -113,7 +121,7 @@ export class QoderModelProvider
   public async provideLanguageModelChatResponse(
     model: QoderModelInformation,
     messages: readonly vscode.LanguageModelChatRequestMessage[],
-    _options: vscode.ProvideLanguageModelChatResponseOptions,
+    options: vscode.ProvideLanguageModelChatResponseOptions,
     progress: vscode.Progress<vscode.LanguageModelResponsePart>,
     token: vscode.CancellationToken,
   ): Promise<void> {
@@ -136,6 +144,40 @@ export class QoderModelProvider
     const config = readConfig();
     const activity = config.showActivity ? new QoderActivityTracker() : undefined;
     const modelOptions = buildModelQueryOptions(model);
+
+    const nativeToolResult = latestNativeToolResult(messages);
+    if (config.nativeToolLoop && nativeToolResult) {
+      if (!isNativeToolCallId(nativeToolResult.callId)) {
+        throw new Error('Invalid Qoder native tool call id. Retry the request.');
+      }
+      const session = this.nativeSessions.get(nativeToolResult.callId);
+      if (!session) {
+        throw new Error(
+          'The Qoder native tool session expired before its result was returned. Retry the request.',
+        );
+      }
+      await this.continueNativeSession(
+        session,
+        nativeToolResult,
+        progress,
+        token,
+      );
+      return;
+    }
+
+    if (config.nativeToolLoop && hasOnlyNativeReadFileTool(options.tools)) {
+      await this.startNativeSession(
+        pat,
+        workspaceFolder.uri.fsPath,
+        modelOptions,
+        config,
+        messages,
+        progress,
+        token,
+      );
+      return;
+    }
+
     let q: Query | undefined;
     let streamedText = false;
     let finalText = '';
@@ -218,6 +260,101 @@ export class QoderModelProvider
   public dispose(): void {
     this.changeEmitter.dispose();
     void this.metadataSession.close();
+    for (const session of this.nativeSessions.values()) {
+      void session.cancel('Qoder native tool provider disposed.');
+    }
+    this.nativeSessions.clear();
+  }
+
+  private async startNativeSession(
+    pat: string,
+    cwd: string,
+    modelOptions: ReturnType<typeof buildModelQueryOptions>,
+    config: ReturnType<typeof readConfig>,
+    messages: readonly vscode.LanguageModelChatRequestMessage[],
+    progress: vscode.Progress<vscode.LanguageModelResponsePart>,
+    token: vscode.CancellationToken,
+  ): Promise<void> {
+    progress.report(
+      new vscode.LanguageModelTextPart('**Qoder**：已接收请求，正在分析……\n\n'),
+    );
+    const session = new NativeQoderSession({
+      pat,
+      cwd,
+      model: modelOptions.model,
+      extraArgs: modelOptions.extraArgs,
+      permissionMode: config.permissionMode,
+      allowDangerouslySkipPermissions:
+        config.permissionMode === 'bypassPermissions',
+      maxTurns: config.maxTurns,
+      prompt: messagesToPrompt(messages),
+    });
+
+    const cancellation = token.onCancellationRequested(() => {
+      void session.cancel();
+    });
+    try {
+      const boundary = await session.start(progress);
+      this.trackNativeBoundary(session, boundary, progress);
+      if (boundary.kind === 'done') {
+        await session.close();
+      }
+    } catch (error) {
+      await session.cancel();
+      throw error;
+    } finally {
+      cancellation.dispose();
+    }
+  }
+
+  private async continueNativeSession(
+    session: NativeQoderSession,
+    result: NonNullable<ReturnType<typeof latestNativeToolResult>>,
+    progress: vscode.Progress<vscode.LanguageModelResponsePart>,
+    token: vscode.CancellationToken,
+  ): Promise<void> {
+    const cancellation = token.onCancellationRequested(() => {
+      void session.cancel();
+    });
+    try {
+      const boundary = await session.continueWithToolResult(result, progress);
+      this.removeNativeSession(session);
+      this.trackNativeBoundary(session, boundary, progress);
+      if (boundary.kind === 'done') {
+        await session.close();
+      }
+    } catch (error) {
+      this.removeNativeSession(session);
+      await session.cancel();
+      throw error;
+    } finally {
+      cancellation.dispose();
+    }
+  }
+
+  private trackNativeBoundary(
+    session: NativeQoderSession,
+    boundary: NativeSessionBoundary,
+    progress: vscode.Progress<vscode.LanguageModelResponsePart>,
+  ): void {
+    if (boundary.kind === 'tool_call') {
+      progress.report(
+        new vscode.LanguageModelToolCallPart(
+          boundary.invocation.callId,
+          boundary.invocation.name,
+          boundary.invocation.input,
+        ),
+      );
+      this.nativeSessions.set(boundary.invocation.callId, session);
+    }
+  }
+
+  private removeNativeSession(session: NativeQoderSession): void {
+    for (const [callId, candidate] of this.nativeSessions) {
+      if (candidate === session) {
+        this.nativeSessions.delete(callId);
+      }
+    }
   }
 
   private async getModels(force: boolean): Promise<CatalogLoadResult> {

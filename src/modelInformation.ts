@@ -29,9 +29,8 @@ export function descriptorToInformation(
     isUserSelectable: true,
     capabilities: {
       imageInput: descriptor.imageInput,
-      // Qoder runs the agent/tool loop internally. Advertising tool calling
-      // makes these models eligible for Copilot's Agent-mode picker; native
-      // VS Code tools are intentionally not forwarded into the Qoder SDK.
+      // Native mode delegates the read-only bridge tool to VS Code; the
+      // fallback path still uses Qoder's internal agent loop.
       toolCalling: true,
     },
     detail: descriptor.detail,

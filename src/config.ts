@@ -6,6 +6,7 @@ export interface BridgeConfig {
   readonly maxTurns: number;
   readonly includePartialMessages: boolean;
   readonly showActivity: boolean;
+  readonly nativeToolLoop: boolean;
 }
 
 const PERMISSION_MODES: readonly PermissionMode[] = [
@@ -14,6 +15,8 @@ const PERMISSION_MODES: readonly PermissionMode[] = [
   'default',
   'plan',
   'bypassPermissions',
+  'yolo',
+  'dontAsk',
 ];
 
 export function readConfig(): BridgeConfig {
@@ -35,5 +38,6 @@ export function readConfig(): BridgeConfig {
       true,
     ),
     showActivity: configuration.get<boolean>('showActivity', true),
+    nativeToolLoop: configuration.get<boolean>('nativeToolLoop', true),
   };
 }

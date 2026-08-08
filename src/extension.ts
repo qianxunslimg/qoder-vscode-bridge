@@ -1,5 +1,6 @@
 import * as vscode from 'vscode';
 import { QoderModelProvider } from './provider.js';
+import { registerQoderReadFileTool } from './nativeReadFileTool.js';
 import { TokenStore } from './tokenStore.js';
 
 function workspaceCwd(): string | undefined {
@@ -9,6 +10,8 @@ function workspaceCwd(): string | undefined {
 export function activate(context: vscode.ExtensionContext): void {
   const tokenStore = new TokenStore(context.secrets);
   const provider = new QoderModelProvider(tokenStore);
+
+  registerQoderReadFileTool(context);
 
   context.subscriptions.push(
     vscode.lm.registerLanguageModelChatProvider('qoder', provider),

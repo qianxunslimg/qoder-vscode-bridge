@@ -29,7 +29,9 @@ Qoder Agent SDK ── 企业版 Qoder 服务
 - 支持 Qwen、Kimi、DeepSeek、GLM、MiniMax 等账号中可用的模型；目录暂时不可用时保留 tier 别名。
 - 根据模型可用信息选择最大的上下文窗口，不再统一固定为 123K。
 - 将当前 Chat 消息和第一个受信任工作区转发给 Qoder Agent SDK。
-- 支持 Qoder 的文本流、工具循环、取消请求、用量查询和权限模式。
+- 保留原生模型选择器；当 Copilot Chat 提供桥接工具时，Qoder 的只读文件调用会转换为 VS Code 原生工具调用，工具结果回传后再继续 Qoder 会话。
+- 原生工具链路目前只开放 `qoder_read_file`，支持一次执行、取消、确认和错误后的再次调用；其他工具暂时保留 Qoder 内部工具循环。
+- 支持 Qoder 的文本流、内部工具循环、取消请求、用量查询和权限模式。
 - 第一次执行工具或子任务时显示执行计划，后续显示轮次、步骤和任务进度摘要，避免连续刷出重复的“正在分析”。
 - 在 Chat 中显示可审计的活动摘要：分析状态、工具操作、脱敏后的命令摘要、工具结果、失败、重试和完成状态。小结果直接展示；大结果显示有限的首尾预览并标出省略行数，避免读取大文件时刷屏；需要完整内容时可让 Qoder 按文件或行范围读取。
 
@@ -37,7 +39,9 @@ Qoder Agent SDK ── 企业版 Qoder 服务
 
 - 不展示模型的原始隐藏思维链（Chain of Thought）。界面显示的是可审计的过程摘要，不是模型内部推理全文。
 - 当前实现是 Language Model Provider，不提供独立的 `@qoder` Chat Participant 或原生 Qoder Session Target。
+- 原生工具委托是渐进迁移：只有 Chat 请求把 `qoder_read_file` 作为唯一可用工具时才启用；如果请求还包含其他工具，自动回退到原有 Qoder 内部工具循环，避免当前只迁移一个工具而影响 Agent 模式的编辑和命令能力。
 - 工具是否可以读取或修改工作区由 Qoder 的权限模式决定，默认使用 `auto`，执行修改操作前应检查 Chat 中的活动信息。
+- 原生 `qoder_read_file` 只允许读取当前工作区内的 UTF-8 文件，并由 VS Code 的工具确认 UI 控制是否执行。
 - 不包含企业账号管理、令牌申请或服务端代理能力。
 
 ## 安装和使用
@@ -74,6 +78,7 @@ npm run package
 | `qoderBridge.maxTurns` | `30` | 单次请求最多执行的 Agent 循环轮数。 |
 | `qoderBridge.includePartialMessages` | `true` | 尽可能把流式文本增量显示到 Chat。 |
 | `qoderBridge.showActivity` | `true` | 是否显示分析、工具、任务、结果、重试和完成状态摘要。 |
+| `qoderBridge.nativeToolLoop` | `true` | Chat 仅提供 `qoder_read_file` 时，是否把只读文件调用交给 VS Code 原生工具循环。 |
 
 ## 开发和验证
 
@@ -90,6 +95,8 @@ npm run package
 QODER_PERSONAL_ACCESS_TOKEN='你的PAT' npm run smoke
 QODER_PERSONAL_ACCESS_TOKEN='你的PAT' npm run catalog:smoke
 QODER_PERSONAL_ACCESS_TOKEN='你的PAT' npm run model:smoke
+QODER_PERSONAL_ACCESS_TOKEN='你的PAT' npm run native:smoke
+QODER_PERSONAL_ACCESS_TOKEN='你的PAT' npm run provider:native:smoke
 ```
 
 不要把真实 PAT 粘贴到 README、源码、日志或 Git 提交中。
@@ -97,6 +104,8 @@ QODER_PERSONAL_ACCESS_TOKEN='你的PAT' npm run model:smoke
 ## 项目结构
 
 - `src/provider.ts`：VS Code Language Model Provider 和请求转发。
+- `src/nativeToolLoop.ts`：Qoder 代理工具、原生工具调用边界和会话续接。
+- `src/nativeReadFileTool.ts`：工作区只读文件工具、确认和取消处理。
 - `src/modelCatalogService.ts`：Qoder 账号模型目录刷新与缓存。
 - `src/messageAdapter.ts`、`src/promptPolicy.ts`：Chat 消息转换和 prompt 压缩。
 - `src/activity.ts`：可审计活动摘要和敏感信息脱敏。

@@ -2,7 +2,7 @@
   "name": "qoder-vscode-bridge",
   "displayName": "Qoder Model Provider for Copilot Chat",
   "description": "Use Qoder Agent SDK models from VS Code's native Chat model picker.",
-  "version": "0.0.8",
+  "version": "0.0.9",
   "publisher": "qianxunslimg",
   "license": "MIT",
   "repository": {
@@ -41,6 +41,45 @@
         "managementCommand": "qoderBridge.setPat"
       }
     ],
+    "languageModelTools": [
+      {
+        "name": "qoder_read_file",
+        "displayName": "Qoder Read File",
+        "modelDescription": "Read a UTF-8 text file inside the current VS Code workspace. This is a read-only bridge tool used by Qoder models for inspection; it must not be used for edits, shell commands, or files outside the workspace.",
+        "userDescription": "Read a workspace file for Qoder",
+        "canBeReferencedInPrompt": true,
+        "toolReferenceName": "qoderReadFile",
+        "icon": "$(file-code)",
+        "tags": [
+          "qoder",
+          "read-only",
+          "workspace"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "file_path": {
+              "type": "string",
+              "description": "Absolute path of a UTF-8 file inside the current workspace."
+            },
+            "offset": {
+              "type": "number",
+              "minimum": 0,
+              "description": "Optional zero-based starting line."
+            },
+            "limit": {
+              "type": "number",
+              "minimum": 1,
+              "maximum": 2000,
+              "description": "Optional maximum number of lines to return."
+            }
+          },
+          "required": [
+            "file_path"
+          ]
+        }
+      }
+    ],
     "commands": [
       {
         "command": "qoderBridge.setPat",
@@ -73,7 +112,9 @@
             "acceptEdits",
             "default",
             "plan",
-            "bypassPermissions"
+            "bypassPermissions",
+            "yolo",
+            "dontAsk"
           ],
           "default": "auto",
           "description": "Qoder tool permission mode used by the model provider."
@@ -94,6 +135,11 @@
           "type": "boolean",
           "default": true,
           "description": "Show Qoder plan, progress, tool results, task, and retry activity in Copilot Chat. Raw hidden reasoning is never displayed."
+        },
+        "qoderBridge.nativeToolLoop": {
+          "type": "boolean",
+          "default": true,
+          "description": "Delegate the Qoder read-only file tool to VS Code's native tool loop when it is the only tool in the Chat request; otherwise preserve Qoder's internal loop."
         }
       }
     }
@@ -105,6 +151,8 @@
     "smoke": "node ./scripts/smoke.mjs",
     "catalog:smoke": "node ./scripts/catalog-smoke.mjs",
     "model:smoke": "node ./scripts/model-smoke.mjs",
+    "native:smoke": "node --require ./scripts/vscode-mock-require.cjs ./scripts/native-tool-loop-smoke.mjs",
+    "provider:native:smoke": "node --require ./scripts/vscode-mock-require.cjs ./scripts/provider-native-loop-smoke.mjs",
     "vscode:prepublish": "npm run compile",
     "package": "vsce package"
   },
