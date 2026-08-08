@@ -1,0 +1,121 @@
+{
+  "name": "qoder-vscode-bridge",
+  "displayName": "Qoder Model Provider for Copilot Chat",
+  "description": "Use Qoder Agent SDK models from VS Code's native Chat model picker.",
+  "version": "0.0.5",
+  "publisher": "qianxunslimg",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/qianxunslimg/qoder-vscode-bridge"
+  },
+  "engines": {
+    "vscode": ">=1.106.0"
+  },
+  "extensionKind": [
+    "workspace"
+  ],
+  "categories": [
+    "AI",
+    "Chat"
+  ],
+  "keywords": [
+    "qoder",
+    "copilot",
+    "language-model",
+    "agent"
+  ],
+  "main": "./out/extension.js",
+  "activationEvents": [
+    "onStartupFinished",
+    "onCommand:qoderBridge.setPat",
+    "onCommand:qoderBridge.clearPat",
+    "onCommand:qoderBridge.refreshModels",
+    "onCommand:qoderBridge.showUsage"
+  ],
+  "contributes": {
+    "languageModelChatProviders": [
+      {
+        "vendor": "qoder",
+        "displayName": "Qoder",
+        "managementCommand": "qoderBridge.setPat"
+      }
+    ],
+    "commands": [
+      {
+        "command": "qoderBridge.setPat",
+        "title": "Qoder: Set Personal Access Token",
+        "category": "Qoder"
+      },
+      {
+        "command": "qoderBridge.clearPat",
+        "title": "Qoder: Clear Personal Access Token",
+        "category": "Qoder"
+      },
+      {
+        "command": "qoderBridge.refreshModels",
+        "title": "Qoder: Refresh Model Catalog",
+        "category": "Qoder"
+      },
+      {
+        "command": "qoderBridge.showUsage",
+        "title": "Qoder: Show Usage",
+        "category": "Qoder"
+      }
+    ],
+    "configuration": {
+      "title": "Qoder Bridge",
+      "properties": {
+        "qoderBridge.permissionMode": {
+          "type": "string",
+          "enum": [
+            "auto",
+            "acceptEdits",
+            "default",
+            "plan",
+            "bypassPermissions"
+          ],
+          "default": "auto",
+          "description": "Qoder tool permission mode used by the model provider."
+        },
+        "qoderBridge.maxTurns": {
+          "type": "number",
+          "minimum": 1,
+          "maximum": 100,
+          "default": 30,
+          "description": "Maximum Qoder tool-loop turns for one Chat request."
+        },
+        "qoderBridge.includePartialMessages": {
+          "type": "boolean",
+          "default": true,
+          "description": "Stream Qoder text deltas into Copilot Chat when available."
+        },
+        "qoderBridge.showActivity": {
+          "type": "boolean",
+          "default": true,
+          "description": "Show Qoder analysis, tool, task, and retry activity in Copilot Chat. Raw hidden reasoning is never displayed."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "compile": "tsc -p ./",
+    "check": "npm run compile",
+    "test": "npm run compile && node --test test/*.test.mjs",
+    "smoke": "node ./scripts/smoke.mjs",
+    "catalog:smoke": "node ./scripts/catalog-smoke.mjs",
+    "model:smoke": "node ./scripts/model-smoke.mjs",
+    "vscode:prepublish": "npm run compile",
+    "package": "vsce package"
+  },
+  "dependencies": {
+    "@qoder-ai/qoder-agent-sdk": "^1.0.19",
+    "zod": "^4.1.12"
+  },
+  "devDependencies": {
+    "@types/node": "^22.15.0",
+    "@types/vscode": "1.106.0",
+    "@vscode/vsce": "^3.6.0",
+    "typescript": "^5.9.2"
+  }
+}
