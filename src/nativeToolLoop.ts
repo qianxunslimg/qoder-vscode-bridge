@@ -12,7 +12,7 @@ import { z } from 'zod';
 export const QODER_READ_FILE_TOOL_NAME = 'qoder_read_file';
 const QODER_MCP_SERVER_NAME = 'qoder-vscode-bridge';
 const NATIVE_CALL_ID_PREFIX = 'qoder-native-';
-const MAX_NATIVE_TOOL_CALLS = 3;
+const QODER_NATIVE_TOOL_PREFIX = 'qoder_native_';
 
 type JsonObject = Record<string, unknown>;
 
@@ -28,6 +28,12 @@ export interface NativeToolInvocation {
   readonly input: Record<string, unknown>;
 }
 
+export interface NativeToolDescriptor {
+  readonly name: string;
+  readonly description: string;
+  readonly inputSchema?: object;
+}
+
 export type NativeSessionBoundary =
   | { readonly kind: 'tool_call'; readonly invocation: NativeToolInvocation }
   | { readonly kind: 'done' };
@@ -39,6 +45,7 @@ interface Deferred<T> {
 }
 
 interface ProxyRequest {
+  readonly proxyName: string;
   readonly input: Record<string, unknown>;
   readonly result: Deferred<CallToolResult>;
 }
@@ -58,6 +65,7 @@ interface NativeSessionOptions {
   readonly allowDangerouslySkipPermissions: boolean;
   readonly maxTurns: number;
   readonly prompt: string;
+  readonly nativeTools: readonly NativeToolDescriptor[];
 }
 
 function deferred<T>(): Deferred<T> {
@@ -136,6 +144,118 @@ function objectValue(value: unknown): JsonObject | undefined {
 
 function textValue(value: unknown): string | undefined {
   return typeof value === 'string' ? value : undefined;
+}
+
+function arrayValue(value: unknown): unknown[] | undefined {
+  return Array.isArray(value) ? value : undefined;
+}
+
+function proxyNameFor(toolName: string, index: number): string {
+  const normalized = toolName.replace(/[^A-Za-z0-9_-]+/g, '_');
+  const suffix = normalized || `tool_${index}`;
+  return `${QODER_NATIVE_TOOL_PREFIX}${index}_${suffix}`.slice(0, 64);
+}
+
+function jsonSchemaLiteral(value: unknown): any {
+  if (value === null) {
+    return z.null();
+  }
+  switch (typeof value) {
+    case 'string':
+      return z.literal(value);
+    case 'number':
+      return z.literal(value);
+    case 'boolean':
+      return z.literal(value);
+    default:
+      return z.unknown();
+  }
+}
+
+function jsonSchemaToZod(schema: unknown): any {
+  const value = objectValue(schema);
+  if (!value) {
+    return z.unknown();
+  }
+
+  const enumValues = arrayValue(value.enum);
+  if (enumValues && enumValues.length > 0) {
+    if (enumValues.length === 1) {
+      return jsonSchemaLiteral(enumValues[0]);
+    }
+    return z.union(enumValues.map(jsonSchemaLiteral) as [any, any, ...any[]]);
+  }
+
+  const alternatives = arrayValue(value.oneOf ?? value.anyOf);
+  if (alternatives && alternatives.length > 0) {
+    if (alternatives.length === 1) {
+      return jsonSchemaToZod(alternatives[0]);
+    }
+    return z.union(
+      alternatives.map(jsonSchemaToZod) as [any, any, ...any[]],
+    );
+  }
+
+  const type = value.type;
+  if (Array.isArray(type)) {
+    if (type.length === 1) {
+      return jsonSchemaToZod({ type: type[0] });
+    }
+    return z.union(
+      type.map((item) => jsonSchemaToZod({ type: item })) as [
+        any,
+        any,
+        ...any[],
+      ],
+    );
+  }
+
+  switch (type) {
+    case 'string':
+      return z.string();
+    case 'integer':
+      return z.number().int();
+    case 'number':
+      return z.number();
+    case 'boolean':
+      return z.boolean();
+    case 'array':
+      return z.array(jsonSchemaToZod(value.items));
+    case 'object': {
+      const shape = jsonSchemaShape(value);
+      return Object.keys(shape).length > 0 ? z.object(shape) : z.record(z.string(), z.unknown());
+    }
+    default:
+      return z.unknown();
+  }
+}
+
+function jsonSchemaShape(schema: unknown): Record<string, any> {
+  const value = objectValue(schema);
+  const properties = objectValue(value?.properties);
+  if (!properties) {
+    return {};
+  }
+  const required = new Set(
+    (arrayValue(value?.required) ?? []).filter(
+      (item): item is string => typeof item === 'string',
+    ),
+  );
+  const shape: Record<string, any> = {};
+  for (const [name, propertySchema] of Object.entries(properties)) {
+    const parsed = jsonSchemaToZod(propertySchema);
+    shape[name] = required.has(name) ? parsed : parsed.optional();
+  }
+  return shape;
+}
+
+function toolInputShape(schema: object | undefined): Record<string, any> {
+  const shape = jsonSchemaShape(schema);
+  // Some private tools omit their schema. Keep their arguments as a generic
+  // object rather than silently forcing Qoder to call an empty-argument tool.
+  return Object.keys(shape).length > 0
+    ? shape
+    : { input: z.record(z.string(), z.unknown()).optional() };
 }
 
 function contentParts(value: unknown): JsonObject[] {
@@ -246,76 +366,101 @@ export function isNativeToolCallId(callId: string): boolean {
 }
 
 /**
- * The first vertical slice is deliberately strict: if Copilot provides any
- * other tools, keep the existing Qoder loop instead of silently removing
- * those tools from the request. This prevents ordinary Agent-mode edits and
- * shell tasks from regressing while only the read-file path is migrated.
+ * A real Agent request supplies the host tools to the provider. Proxy all of
+ * them through the same native boundary; an empty tool list still uses the
+ * legacy Qoder loop for ordinary text-only chat.
  */
-export function hasOnlyNativeReadFileTool(
+export function hasNativeToolLoopTools(
   tools: readonly vscode.LanguageModelChatTool[] | undefined,
 ): boolean {
-  return (
-    tools?.length === 1 &&
-    tools[0]?.name === QODER_READ_FILE_TOOL_NAME
-  );
+  return (tools?.length ?? 0) > 0;
 }
 
 /**
- * Runs Qoder with exactly one MCP proxy tool. The proxy never reads files: it
- * pauses until VS Code invokes the matching native extension tool and returns
- * its result. This keeps the Qoder agent loop alive without executing the
- * underlying tool twice.
+ * Runs Qoder with one MCP proxy per host tool. A proxy never executes the
+ * underlying operation: it pauses until VS Code invokes the matching native
+ * tool and returns its result. This keeps the Qoder agent loop alive without
+ * executing any tool twice.
  */
 export class NativeQoderSession {
   private readonly q: Query;
   private readonly messages = new AsyncQueue<SDKMessage>();
-  private readonly proxyRequests = new AsyncQueue<ProxyRequest>();
+  private readonly proxyRequests = new Map<string, AsyncQueue<ProxyRequest>>();
+  private readonly proxyTools = new Map<
+    string,
+    NativeToolDescriptor & { readonly proxyName: string }
+  >();
   private readonly pendingCalls = new Map<string, ProxyRequest>();
   private readonly seenToolCalls = new Set<string>();
   private readonly abortController = new AbortController();
   private readonly pumpPromise: Promise<void>;
+  private readonly maxNativeToolCalls: number;
   private toolCallCount = 0;
   private closed = false;
 
   public constructor(options: NativeSessionOptions) {
-    let bridgeHandler: (input: Record<string, unknown>) => Promise<CallToolResult>;
+    this.maxNativeToolCalls = Math.max(1, options.maxTurns);
+    const proxyTools = options.nativeTools.map((descriptor, index) => ({
+      ...descriptor,
+      proxyName: proxyNameFor(descriptor.name, index),
+    }));
+    for (const descriptor of proxyTools) {
+      this.proxyTools.set(descriptor.proxyName, descriptor);
+      this.proxyRequests.set(descriptor.proxyName, new AsyncQueue<ProxyRequest>());
+    }
+
     const server = createSdkMcpServer({
       name: QODER_MCP_SERVER_NAME,
-      tools: [
+      tools: proxyTools.map((descriptor) =>
         tool(
-          QODER_READ_FILE_TOOL_NAME,
-          'Ask the VS Code host to read one UTF-8 workspace file. This tool is read-only and must be used instead of any other tool.',
-          {
-            file_path: z.string(),
-            offset: z.number().int().nonnegative().optional(),
-            limit: z.number().int().positive().optional(),
+          descriptor.proxyName,
+          [
+            `Proxy for the VS Code host tool ${descriptor.name}.`,
+            descriptor.description,
+            'Return the host result to Qoder without executing the operation inside Qoder.',
+          ].join(' '),
+          toolInputShape(descriptor.inputSchema),
+          async (input) => {
+            const queue = this.proxyRequests.get(descriptor.proxyName);
+            if (!queue) {
+              throw new Error(`Missing proxy queue for ${descriptor.proxyName}.`);
+            }
+            const request = {
+              proxyName: descriptor.proxyName,
+              input: input as Record<string, unknown>,
+              result: deferred<CallToolResult>(),
+            };
+            queue.push(request);
+            return request.result.promise;
           },
-          async (input) => bridgeHandler(input),
           {
-            exposedName: QODER_READ_FILE_TOOL_NAME,
+            exposedName: descriptor.proxyName,
             alwaysLoad: true,
             permissionPolicy: 'always_allow',
-            annotations: { readOnlyHint: true },
+            annotations: {
+              readOnlyHint: descriptor.name === QODER_READ_FILE_TOOL_NAME,
+              destructiveHint: descriptor.name !== QODER_READ_FILE_TOOL_NAME,
+            },
           },
         ),
-      ],
+      ),
     });
-    bridgeHandler = async (input) => {
-      const request = {
-        input,
-        result: deferred<CallToolResult>(),
-      };
-      this.proxyRequests.push(request);
-      return request.result.promise;
-    };
+
+    const mapping = proxyTools
+      .map(
+        (descriptor) =>
+          `- ${descriptor.proxyName} -> host tool ${descriptor.name}: ${descriptor.description}`,
+      )
+      .join('\n');
 
     this.q = query({
       prompt: [
         options.prompt,
         '',
-        `Only one tool is available: ${QODER_READ_FILE_TOOL_NAME}.`,
-        'Use it for read-only workspace inspection; do not use or simulate any other tool.',
-        'If the host returns a tool error, you may retry this same tool with corrected arguments.',
+        'The following tools are host proxies. Use the proxy names exactly as listed; do not call or simulate any other tool.',
+        mapping,
+        'The host, not Qoder, executes the operation and returns its result.',
+        'If the host returns a tool error, correct the arguments and retry the same proxy when appropriate.',
         'After the tool result is available, return the concise final answer to the user.',
       ].join('\n'),
       options: {
@@ -328,7 +473,7 @@ export class NativeQoderSession {
           options.allowDangerouslySkipPermissions,
         maxTurns: options.maxTurns,
         includePartialMessages: true,
-        tools: [QODER_READ_FILE_TOOL_NAME],
+        tools: proxyTools.map((descriptor) => descriptor.proxyName),
         mcpServers: { [QODER_MCP_SERVER_NAME]: server },
         abortController: this.abortController,
       },
@@ -351,6 +496,13 @@ export class NativeQoderSession {
       throw new Error(`Qoder native tool session has no pending call ${result.callId}.`);
     }
     this.pendingCalls.delete(result.callId);
+    progress.report(
+      new vscode.LanguageModelTextPart(
+        result.isError
+          ? '**Qoder**：进度摘要：工具返回错误，正在把错误交回 Qoder 处理……\n\n'
+          : '**Qoder**：进度摘要：已收到工具结果，正在继续分析……\n\n',
+      ),
+    );
     pending.result.resolve({
       content: [{ type: 'text', text: result.text || '(empty tool result)' }],
       isError: result.isError,
@@ -369,7 +521,9 @@ export class NativeQoderSession {
     }
     this.pendingCalls.clear();
     this.messages.close(error);
-    this.proxyRequests.close(error);
+    for (const queue of this.proxyRequests.values()) {
+      queue.close(error);
+    }
     this.abortController.abort();
     await this.q.interrupt().catch(() => undefined);
     await this.q.close().catch(() => undefined);
@@ -387,7 +541,9 @@ export class NativeQoderSession {
     }
     this.pendingCalls.clear();
     this.messages.close();
-    this.proxyRequests.close(error);
+    for (const queue of this.proxyRequests.values()) {
+      queue.close(error);
+    }
     this.abortController.abort();
     await this.q.close().catch(() => undefined);
     await this.pumpPromise.catch(() => undefined);
@@ -425,32 +581,38 @@ export class NativeQoderSession {
         qoderInvocation &&
         !this.seenToolCalls.has(qoderInvocation.callId)
       ) {
-        if (qoderInvocation.name !== QODER_READ_FILE_TOOL_NAME) {
+        const proxy = this.proxyTools.get(qoderInvocation.name);
+        if (!proxy) {
           throw new Error(
-            `Qoder requested unsupported native tool ${qoderInvocation.name}; only ${QODER_READ_FILE_TOOL_NAME} is enabled.`,
+            `Qoder requested unsupported native proxy ${qoderInvocation.name}.`,
           );
         }
-        if (this.toolCallCount >= MAX_NATIVE_TOOL_CALLS) {
+        if (this.toolCallCount >= this.maxNativeToolCalls) {
           throw new Error(
-            `Qoder requested ${MAX_NATIVE_TOOL_CALLS + 1} native tool calls; stopping to prevent an unbounded loop.`,
+            `Qoder requested more than ${this.maxNativeToolCalls} native tool calls; stopping to prevent an unbounded loop.`,
           );
         }
         this.seenToolCalls.add(qoderInvocation.callId);
         this.toolCallCount += 1;
-        const proxyRequest = await this.proxyRequests.next();
+        const queue = this.proxyRequests.get(proxy.proxyName);
+        if (!queue) {
+          throw new Error(`Missing native proxy queue for ${proxy.proxyName}.`);
+        }
+        const proxyRequest = await queue.next();
         if (!proxyRequest) {
-          throw new Error('Qoder requested a native tool without a proxy request.');
+          throw new Error(
+            `Qoder requested ${proxy.proxyName} without a proxy request.`,
+          );
         }
         const invocation = {
           ...qoderInvocation,
+          name: proxy.name,
           callId: `${NATIVE_CALL_ID_PREFIX}${qoderInvocation.callId}`,
         };
         this.pendingCalls.set(invocation.callId, proxyRequest);
         progress.report(
           new vscode.LanguageModelTextPart(
-            '**Qoder**：已将只读工具 `' +
-              QODER_READ_FILE_TOOL_NAME +
-              '` 交给 VS Code 执行。\n\n',
+            `**Qoder**：进度摘要：步骤 ${this.toolCallCount}，调用工具 \`${proxy.name}\`，等待 VS Code 执行结果……\n\n`,
           ),
         );
         return { kind: 'tool_call', invocation };

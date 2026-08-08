@@ -2,7 +2,7 @@
   "name": "qoder-vscode-bridge",
   "displayName": "Qoder Model Provider for Copilot Chat",
   "description": "Use Qoder Agent SDK models from VS Code's native Chat model picker.",
-  "version": "0.0.9",
+  "version": "0.0.11",
   "publisher": "qianxunslimg",
   "license": "MIT",
   "repository": {
@@ -116,8 +116,8 @@
             "yolo",
             "dontAsk"
           ],
-          "default": "auto",
-          "description": "Qoder tool permission mode used by the model provider."
+          "default": "bypassPermissions",
+          "description": "Qoder tool permission mode used by the model provider. The default skips Qoder-side approval; VS Code host-tool confirmation remains controlled by the host."
         },
         "qoderBridge.maxTurns": {
           "type": "number",
@@ -139,7 +139,7 @@
         "qoderBridge.nativeToolLoop": {
           "type": "boolean",
           "default": true,
-          "description": "Delegate the Qoder read-only file tool to VS Code's native tool loop when it is the only tool in the Chat request; otherwise preserve Qoder's internal loop."
+          "description": "Delegate tools supplied by Copilot Chat to VS Code's native tool loop. Requests without host tools keep Qoder's internal text-only path."
         }
       }
     }

@@ -21,10 +21,13 @@ const PERMISSION_MODES: readonly PermissionMode[] = [
 
 export function readConfig(): BridgeConfig {
   const configuration = vscode.workspace.getConfiguration('qoderBridge');
-  const configuredMode = configuration.get<string>('permissionMode', 'auto');
+  const configuredMode = configuration.get<string>(
+    'permissionMode',
+    'bypassPermissions',
+  );
   const permissionMode = PERMISSION_MODES.includes(configuredMode as PermissionMode)
     ? (configuredMode as PermissionMode)
-    : 'auto';
+    : 'bypassPermissions';
   const maxTurns = Math.max(
     1,
     Math.min(100, configuration.get<number>('maxTurns', 30)),

@@ -57,18 +57,61 @@ const userMessage = {
   name: undefined,
   content: [
     new vscode.LanguageModelTextPart(
-      `Read ${readmePath} and then reply with exactly PROVIDER_NATIVE_LOOP_OK.`,
+      'Run Bash exactly once with command "printf PROVIDER_NATIVE_LOOP_OK" and then reply with exactly PROVIDER_NATIVE_LOOP_OK.',
     ),
   ],
 };
 const options = {
   tools: [
-    {
-      name: 'qoder_read_file',
-      description: 'Read a workspace file.',
-      inputSchema: { type: 'object' },
-    },
-  ],
+    'Agent',
+    'AskUserQuestion',
+    'Bash',
+    'Edit',
+    'Glob',
+    'Grep',
+    'ImageGen',
+    'ImageSearch',
+    'NotebookEdit',
+    'Read',
+    'Skill',
+    'TaskCreate',
+    'TaskGet',
+    'TaskUpdate',
+    'TaskList',
+    'WebFetch',
+    'WebSearch',
+    'Write',
+    'qoder_read_file',
+  ].map((name) => ({
+    name,
+    description:
+      name === 'Bash'
+        ? 'Run one shell command in the workspace.'
+        : name === 'qoder_read_file'
+          ? 'Read a workspace file.'
+          : `Host tool ${name}.`,
+    inputSchema:
+      name === 'Bash'
+        ? {
+            type: 'object',
+            properties: {
+              command: { type: 'string' },
+              description: { type: 'string' },
+            },
+            required: ['command'],
+          }
+        : name === 'qoder_read_file'
+          ? {
+              type: 'object',
+              properties: {
+                file_path: { type: 'string' },
+                offset: { type: 'number' },
+                limit: { type: 'number' },
+              },
+              required: ['file_path'],
+            }
+          : { type: 'object', properties: {} },
+  })),
   toolMode: vscode.LanguageModelChatToolMode?.Auto,
 };
 
@@ -86,15 +129,15 @@ try {
   );
   assert.equal(toolCalls.length, 1);
   const [toolCall] = toolCalls;
-  assert.equal(toolCall.name, 'qoder_read_file');
+  assert.equal(toolCall.name, 'Bash');
 
   const nativeTool = new QoderReadFileTool();
-  const nativeResult = await nativeTool.invoke(
-    { input: toolCall.input, toolInvocationToken: undefined },
+  const readToolResult = await nativeTool.invoke(
+    { input: { file_path: readmePath, limit: 3 }, toolInvocationToken: undefined },
     token(),
   );
-  assert.ok(nativeResult.content.length > 0);
-  assert.match(nativeResult.content[0].value, /Lines/);
+  assert.ok(readToolResult.content.length > 0);
+  assert.match(readToolResult.content[0].value, /Lines/);
 
   const assistantMessage = {
     role: vscode.LanguageModelChatMessageRole.Assistant,
@@ -107,7 +150,7 @@ try {
     content: [
       new vscode.LanguageModelToolResultPart(
         toolCall.callId,
-        nativeResult.content,
+        [new vscode.LanguageModelTextPart('stdout: PROVIDER_NATIVE_LOOP_OK')],
       ),
     ],
   };
@@ -129,7 +172,9 @@ try {
     JSON.stringify({
       marker: 'PROVIDER_NATIVE_TOOL_LOOP_OK',
       toolCalls: toolCalls.length,
-      nativeResultLines: nativeResult.content[0].value.split('\n').length,
+      toolName: toolCall.name,
+      availableTools: options.tools.length,
+      nativeResultLines: readToolResult.content[0].value.split('\n').length,
       final: finalText.trim(),
     }),
   );

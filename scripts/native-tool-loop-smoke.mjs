@@ -49,6 +49,21 @@ async function createSession(prompt) {
     allowDangerouslySkipPermissions: false,
     maxTurns: 6,
     prompt,
+    nativeTools: [
+      {
+        name: QODER_READ_FILE_TOOL_NAME,
+        description: 'Read one UTF-8 workspace file.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            file_path: { type: 'string' },
+            offset: { type: 'number' },
+            limit: { type: 'number' },
+          },
+          required: ['file_path'],
+        },
+      },
+    ],
   });
 }
 
