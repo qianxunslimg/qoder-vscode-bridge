@@ -2,9 +2,6 @@ type JsonObject = Record<string, unknown>;
 
 const INLINE_RESULT_MAX_CHARS = 2_400;
 const INLINE_RESULT_MAX_LINES = 32;
-const RESULT_PREVIEW_HEAD_LINES = 14;
-const RESULT_PREVIEW_TAIL_LINES = 6;
-const RESULT_PREVIEW_MAX_CHARS = 4_000;
 
 function objectValue(value: unknown): JsonObject | undefined {
   return typeof value === 'object' && value !== null
@@ -155,22 +152,10 @@ function resultBody(value: string): string {
     return codeBlock(value);
   }
 
-  const head = lines.slice(0, RESULT_PREVIEW_HEAD_LINES);
-  const tail = lines.slice(-RESULT_PREVIEW_TAIL_LINES);
-  const omittedLines = Math.max(0, lines.length - head.length - tail.length);
-  const previewLines = omittedLines
-    ? [
-        ...head,
-        `… 中间 ${omittedLines} 行已折叠，避免大段结果刷屏 …`,
-        ...tail,
-      ]
-    : lines;
-  let preview = previewLines.join('\n');
-  if (preview.length > RESULT_PREVIEW_MAX_CHARS) {
-    preview = `${preview.slice(0, RESULT_PREVIEW_MAX_CHARS)}\n… 预览已截断 …`;
-  }
-
-  return `<details>\n<summary>查看结果预览（${resultMetrics(value)}）</summary>\n\n${codeBlock(preview)}</details>\n\n`;
+  // VS Code renders provider text as Markdown, but does not turn arbitrary
+  // HTML <details> tags into a collapsible card. Keep large output out of the
+  // response by default instead of leaking literal tags or flooding the chat.
+  return `*结果较大，默认隐藏（${resultMetrics(value)}）。如需查看，请让我按文件或行范围读取。*\n\n`;
 }
 
 function toolResultNotice(
@@ -191,7 +176,7 @@ function toolResultNotice(
 }
 
 function notice(message: string): string {
-  return `> **Qoder**：${message}\n\n`;
+  return `**Qoder**：${message}\n\n`;
 }
 
 function planNotice(taskDescription?: string): string {
@@ -199,10 +184,11 @@ function planNotice(taskDescription?: string): string {
     ? `执行子任务：${taskDescription}`
     : '按需调用工具并核对结果';
   return [
-    '> **Qoder**：执行计划',
-    '> 1. 分析请求与上下文',
-    `> 2. ${task}`,
-    '> 3. 汇总结果并回复',
+    '**Qoder**：执行计划',
+    '',
+    '1. 分析请求与上下文',
+    `2. ${task}`,
+    '3. 汇总结果并回复',
     '',
     '',
   ].join('\n');

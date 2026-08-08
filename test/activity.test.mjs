@@ -14,7 +14,7 @@ test('summarizes thinking without exposing the hidden reasoning text', () => {
         content_block: { type: 'thinking' },
       },
     }),
-    ['> **Qoder**：正在分析请求……\n\n'],
+    ['**Qoder**：正在分析请求……\n\n'],
   );
 
   assert.deepEqual(
@@ -41,8 +41,8 @@ test('reports tool start and completion without exposing tool input', () => {
       },
     }),
     [
-      '> **Qoder**：执行计划\n> 1. 分析请求与上下文\n> 2. 按需调用工具并核对结果\n> 3. 汇总结果并回复\n\n',
-      '> **Qoder**：进度摘要：步骤 1，调用工具 `Bash`……\n\n',
+      '**Qoder**：执行计划\n\n1. 分析请求与上下文\n2. 按需调用工具并核对结果\n3. 汇总结果并回复\n\n',
+      '**Qoder**：进度摘要：步骤 1，调用工具 `Bash`……\n\n',
     ],
   );
 
@@ -62,7 +62,7 @@ test('reports tool start and completion without exposing tool input', () => {
       },
     }),
     [
-      '> **Qoder**：工具 `Bash` 已完成（1 行，21 字符）。\n\n```text\nsecret command output\n```\n\n',
+      '**Qoder**：工具 `Bash` 已完成（1 行，21 字符）。\n\n```text\nsecret command output\n```\n\n',
     ],
   );
 });
@@ -93,7 +93,7 @@ test('shows a small successful tool result inline', () => {
   });
 
   assert.deepEqual(updates, [
-    '> **Qoder**：工具 `Bash` 已完成（2 行，17 字符）。\n\n```text\nline one\nline two\n```\n\n',
+    '**Qoder**：工具 `Bash` 已完成（2 行，17 字符）。\n\n```text\nline one\nline two\n```\n\n',
   ]);
 });
 
@@ -121,11 +121,11 @@ test('reports a useful round summary instead of repeating generic analysis notic
   });
 
   assert.deepEqual(updates, [
-    '> **Qoder**：进度摘要：第 2 轮分析，已完成 0 个工具，继续判断下一步……\n\n',
+    '**Qoder**：进度摘要：第 2 轮分析，已完成 0 个工具，继续判断下一步……\n\n',
   ]);
 });
 
-test('folds a large successful tool result and keeps a bounded preview', () => {
+test('hides a large successful tool result by default', () => {
   const tracker = new QoderActivityTracker();
   tracker.consume({
     type: 'stream_event',
@@ -155,13 +155,12 @@ test('folds a large successful tool result and keeps a bounded preview', () => {
   });
 
   assert.equal(updates.length, 1);
-  assert.match(updates[0], /> \*\*Qoder\*\*：工具 `Bash` 已完成（40 行，/);
-  assert.match(updates[0], /<details>/);
-  assert.match(updates[0], /查看结果预览/);
-  assert.match(updates[0], /line-1/);
-  assert.match(updates[0], /line-40/);
+  assert.match(updates[0], /\*\*Qoder\*\*：工具 `Bash` 已完成（40 行，/);
+  assert.doesNotMatch(updates[0], /<details>|<summary>/);
+  assert.match(updates[0], /结果较大，默认隐藏/);
+  assert.doesNotMatch(updates[0], /line-1|line-40/);
   assert.doesNotMatch(updates[0], /line-20/);
-  assert.ok(updates[0].length < 6_000);
+  assert.ok(updates[0].length < 400);
 });
 
 test('redacts secrets in successful tool results', () => {
@@ -219,7 +218,7 @@ test('shows a redacted operation preview when the full tool input arrives', () =
   });
 
   assert.deepEqual(updates, [
-    '> **Qoder**：操作：执行命令 `echo [redacted-token]`\n\n',
+    '**Qoder**：操作：执行命令 `echo [redacted-token]`\n\n',
   ]);
   assert.equal(updates.join('').includes('pt-secret-token'), false);
 });
@@ -260,7 +259,7 @@ test('shows a redacted operation preview when tool input is streamed as JSON del
   });
 
   assert.deepEqual(updates, [
-    '> **Qoder**：操作：执行命令 `git status --short`\n\n',
+      '**Qoder**：操作：执行命令 `git status --short`\n\n',
   ]);
   assert.equal(updates.join('').includes('pt-secret-token'), false);
 });
@@ -291,7 +290,7 @@ test('includes a redacted failure summary for a failed tool result', () => {
   });
 
   assert.deepEqual(updates, [
-    '> **Qoder**：工具 `Bash` 失败（1 行，39 字符）：command failed: access-token=[redacted]\n\n```text\ncommand failed: access-token=[redacted]\n```\n\n',
+    '**Qoder**：工具 `Bash` 失败（1 行，39 字符）：command failed: access-token=[redacted]\n\n```text\ncommand failed: access-token=[redacted]\n```\n\n',
   ]);
   assert.equal(updates.join('').includes('pt-secret-token'), false);
 });
@@ -306,8 +305,8 @@ test('reports task progress and result turns', () => {
       description: 'Inspect the workspace',
     }),
     [
-      '> **Qoder**：执行计划\n> 1. 分析请求与上下文\n> 2. 执行子任务：Inspect the workspace\n> 3. 汇总结果并回复\n\n',
-      '> **Qoder**：进度摘要：开始任务「Inspect the workspace」\n\n',
+      '**Qoder**：执行计划\n\n1. 分析请求与上下文\n2. 执行子任务：Inspect the workspace\n3. 汇总结果并回复\n\n',
+      '**Qoder**：进度摘要：开始任务「Inspect the workspace」\n\n',
     ],
   );
 
@@ -317,7 +316,7 @@ test('reports task progress and result turns', () => {
       subtype: 'success',
       num_turns: 3,
     }),
-    ['> **Qoder**：执行完成：共 3 轮，已完成 0 个工具。\n\n'],
+    ['**Qoder**：执行完成：共 3 轮，已完成 0 个工具。\n\n'],
   );
 });
 
@@ -335,7 +334,7 @@ test('explains retry timing and status without leaking the error token', () => {
   });
 
   assert.deepEqual(updates, [
-    '> **Qoder**：请求重试（第 1 / 10 次，1500ms 后，HTTP 429）：access-token=[redacted] was rate limited\n\n',
+    '**Qoder**：请求重试（第 1 / 10 次，1500ms 后，HTTP 429）：access-token=[redacted] was rate limited\n\n',
   ]);
   assert.equal(updates.join('').includes('pt-secret-token'), false);
 });
@@ -349,6 +348,6 @@ test('marks the runtime boundary so startup latency is visible', () => {
       subtype: 'init',
       model: 'Auto',
     }),
-    ['> **Qoder**：运行时已启动，当前模型：Auto\n\n'],
+    ['**Qoder**：运行时已启动，当前模型：Auto\n\n'],
   );
 });
