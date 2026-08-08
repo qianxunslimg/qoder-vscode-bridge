@@ -121,11 +121,11 @@ test('reports a useful round summary instead of repeating generic analysis notic
   });
 
   assert.deepEqual(updates, [
-    '**Qoder**：进度摘要：第 2 轮分析，已完成 0 个工具，继续判断下一步……\n\n',
+    '**Qoder**：思考摘要：第 2 轮，已完成 0 个工具，正在基于结果决定下一步……\n\n',
   ]);
 });
 
-test('hides a large successful tool result by default', () => {
+test('shows a bounded preview for a large successful tool result', () => {
   const tracker = new QoderActivityTracker();
   tracker.consume({
     type: 'stream_event',
@@ -157,10 +157,12 @@ test('hides a large successful tool result by default', () => {
   assert.equal(updates.length, 1);
   assert.match(updates[0], /\*\*Qoder\*\*：工具 `Bash` 已完成（40 行，/);
   assert.doesNotMatch(updates[0], /<details>|<summary>/);
-  assert.match(updates[0], /结果较大，默认隐藏/);
-  assert.doesNotMatch(updates[0], /line-1|line-40/);
+  assert.match(updates[0], /结果预览/);
+  assert.match(updates[0], /line-1/);
+  assert.match(updates[0], /line-40/);
+  assert.match(updates[0], /中间 20 行已省略/);
   assert.doesNotMatch(updates[0], /line-20/);
-  assert.ok(updates[0].length < 400);
+  assert.ok(updates[0].length < 3_000);
 });
 
 test('redacts secrets in successful tool results', () => {

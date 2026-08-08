@@ -2,6 +2,9 @@ type JsonObject = Record<string, unknown>;
 
 const INLINE_RESULT_MAX_CHARS = 2_400;
 const INLINE_RESULT_MAX_LINES = 32;
+const RESULT_PREVIEW_HEAD_LINES = 12;
+const RESULT_PREVIEW_TAIL_LINES = 8;
+const RESULT_PREVIEW_MAX_CHARS = 4_000;
 
 function objectValue(value: unknown): JsonObject | undefined {
   return typeof value === 'object' && value !== null
@@ -153,9 +156,28 @@ function resultBody(value: string): string {
   }
 
   // VS Code renders provider text as Markdown, but does not turn arbitrary
-  // HTML <details> tags into a collapsible card. Keep large output out of the
-  // response by default instead of leaking literal tags or flooding the chat.
-  return `*结果较大，默认隐藏（${resultMetrics(value)}）。如需查看，请让我按文件或行范围读取。*\n\n`;
+  // HTML <details> tags into a collapsible card. Show a bounded head/tail
+  // preview instead: the user gets evidence of what the tool found without
+  // flooding the chat with a complete file or search result.
+  const head = lines.slice(0, RESULT_PREVIEW_HEAD_LINES);
+  const tail = lines.slice(-RESULT_PREVIEW_TAIL_LINES);
+  const omittedLines = Math.max(0, lines.length - head.length - tail.length);
+  const previewLines = omittedLines
+    ? [
+        ...head,
+        `… 中间 ${omittedLines} 行已省略，完整结果未展开 …`,
+        ...tail,
+      ]
+    : lines;
+  let preview = previewLines.join('\n');
+  if (preview.length > RESULT_PREVIEW_MAX_CHARS) {
+    preview = `${preview.slice(0, RESULT_PREVIEW_MAX_CHARS)}\n… 预览已截断 …`;
+  }
+
+  const previewSummary = omittedLines
+    ? `结果预览（${resultMetrics(value)}；显示前 ${head.length} 行和后 ${tail.length} 行，中间 ${omittedLines} 行已省略）`
+    : `结果预览（${resultMetrics(value)}）`;
+  return `**${previewSummary}**\n\n${codeBlock(preview)}`;
 }
 
 function toolResultNotice(
@@ -397,7 +419,7 @@ export class QoderActivityTracker {
     }
     notices.push(
       notice(
-        `进度摘要：第 ${this.thinkingRound} 轮分析，已完成 ${this.completedToolCount} 个工具，继续判断下一步……`,
+        `思考摘要：第 ${this.thinkingRound} 轮，已完成 ${this.completedToolCount} 个工具，正在基于结果决定下一步……`,
       ),
     );
   }
