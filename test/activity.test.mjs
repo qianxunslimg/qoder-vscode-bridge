@@ -40,7 +40,10 @@ test('reports tool start and completion without exposing tool input', () => {
         content_block: { type: 'tool_use', id: 'tool-1', name: 'Bash' },
       },
     }),
-    ['> **Qoder**：调用工具 `Bash`……\n\n'],
+    [
+      '> **Qoder**：执行计划\n> 1. 分析请求与上下文\n> 2. 按需调用工具并核对结果\n> 3. 汇总结果并回复\n\n',
+      '> **Qoder**：进度摘要：步骤 1，调用工具 `Bash`……\n\n',
+    ],
   );
 
   assert.deepEqual(
@@ -58,8 +61,136 @@ test('reports tool start and completion without exposing tool input', () => {
         ],
       },
     }),
-    ['> **Qoder**：工具 `Bash` 已完成。\n\n'],
+    [
+      '> **Qoder**：工具 `Bash` 已完成（1 行，21 字符）。\n\n```text\nsecret command output\n```\n\n',
+    ],
   );
+});
+
+test('shows a small successful tool result inline', () => {
+  const tracker = new QoderActivityTracker();
+  tracker.consume({
+    type: 'stream_event',
+    event: {
+      type: 'content_block_start',
+      content_block: { type: 'tool_use', id: 'tool-result', name: 'Bash' },
+    },
+  });
+
+  const updates = tracker.consume({
+    type: 'user',
+    message: {
+      role: 'user',
+      content: [
+        {
+          type: 'tool_result',
+          tool_use_id: 'tool-result',
+          is_error: false,
+          content: 'line one\nline two',
+        },
+      ],
+    },
+  });
+
+  assert.deepEqual(updates, [
+    '> **Qoder**：工具 `Bash` 已完成（2 行，17 字符）。\n\n```text\nline one\nline two\n```\n\n',
+  ]);
+});
+
+test('reports a useful round summary instead of repeating generic analysis notices', () => {
+  const tracker = new QoderActivityTracker();
+  tracker.begin();
+  tracker.consume({
+    type: 'stream_event',
+    event: {
+      type: 'content_block_start',
+      content_block: { type: 'tool_use', id: 'tool-round', name: 'Bash' },
+    },
+  });
+  tracker.consume({
+    type: 'stream_event',
+    event: { type: 'content_block_stop' },
+  });
+
+  const updates = tracker.consume({
+    type: 'stream_event',
+    event: {
+      type: 'content_block_start',
+      content_block: { type: 'thinking' },
+    },
+  });
+
+  assert.deepEqual(updates, [
+    '> **Qoder**：进度摘要：第 2 轮分析，已完成 0 个工具，继续判断下一步……\n\n',
+  ]);
+});
+
+test('folds a large successful tool result and keeps a bounded preview', () => {
+  const tracker = new QoderActivityTracker();
+  tracker.consume({
+    type: 'stream_event',
+    event: {
+      type: 'content_block_start',
+      content_block: { type: 'tool_use', id: 'tool-large-result', name: 'Bash' },
+    },
+  });
+
+  const output = Array.from(
+    { length: 40 },
+    (_, index) => `line-${index + 1} ${'x'.repeat(80)}`,
+  ).join('\n');
+  const updates = tracker.consume({
+    type: 'user',
+    message: {
+      role: 'user',
+      content: [
+        {
+          type: 'tool_result',
+          tool_use_id: 'tool-large-result',
+          is_error: false,
+          content: output,
+        },
+      ],
+    },
+  });
+
+  assert.equal(updates.length, 1);
+  assert.match(updates[0], /> \*\*Qoder\*\*：工具 `Bash` 已完成（40 行，/);
+  assert.match(updates[0], /<details>/);
+  assert.match(updates[0], /查看结果预览/);
+  assert.match(updates[0], /line-1/);
+  assert.match(updates[0], /line-40/);
+  assert.doesNotMatch(updates[0], /line-20/);
+  assert.ok(updates[0].length < 6_000);
+});
+
+test('redacts secrets in successful tool results', () => {
+  const tracker = new QoderActivityTracker();
+  tracker.consume({
+    type: 'stream_event',
+    event: {
+      type: 'content_block_start',
+      content_block: { type: 'tool_use', id: 'tool-secret-result', name: 'Bash' },
+    },
+  });
+
+  const updates = tracker.consume({
+    type: 'user',
+    message: {
+      role: 'user',
+      content: [
+        {
+          type: 'tool_result',
+          tool_use_id: 'tool-secret-result',
+          is_error: false,
+          content: 'access-token=pt-secret-token',
+        },
+      ],
+    },
+  });
+
+  assert.equal(updates.join('').includes('pt-secret-token'), false);
+  assert.equal(updates.join('').includes('access-token=[redacted]'), true);
 });
 
 test('shows a redacted operation preview when the full tool input arrives', () => {
@@ -160,7 +291,7 @@ test('includes a redacted failure summary for a failed tool result', () => {
   });
 
   assert.deepEqual(updates, [
-    '> **Qoder**：工具 `Bash` 失败：command failed: access-token=[redacted]\n\n',
+    '> **Qoder**：工具 `Bash` 失败（1 行，39 字符）：command failed: access-token=[redacted]\n\n```text\ncommand failed: access-token=[redacted]\n```\n\n',
   ]);
   assert.equal(updates.join('').includes('pt-secret-token'), false);
 });
@@ -174,7 +305,10 @@ test('reports task progress and result turns', () => {
       subtype: 'task_started',
       description: 'Inspect the workspace',
     }),
-    ['> **Qoder**：开始任务：Inspect the workspace\n\n'],
+    [
+      '> **Qoder**：执行计划\n> 1. 分析请求与上下文\n> 2. 执行子任务：Inspect the workspace\n> 3. 汇总结果并回复\n\n',
+      '> **Qoder**：进度摘要：开始任务「Inspect the workspace」\n\n',
+    ],
   );
 
   assert.deepEqual(
@@ -183,7 +317,7 @@ test('reports task progress and result turns', () => {
       subtype: 'success',
       num_turns: 3,
     }),
-    ['> **Qoder**：完成，共 3 轮。\n\n'],
+    ['> **Qoder**：执行完成：共 3 轮，已完成 0 个工具。\n\n'],
   );
 });
 

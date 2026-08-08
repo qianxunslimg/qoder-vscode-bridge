@@ -1,5 +1,11 @@
 type JsonObject = Record<string, unknown>;
 
+const INLINE_RESULT_MAX_CHARS = 2_400;
+const INLINE_RESULT_MAX_LINES = 32;
+const RESULT_PREVIEW_HEAD_LINES = 14;
+const RESULT_PREVIEW_TAIL_LINES = 6;
+const RESULT_PREVIEW_MAX_CHARS = 4_000;
+
 function objectValue(value: unknown): JsonObject | undefined {
   return typeof value === 'object' && value !== null
     ? (value as JsonObject)
@@ -53,13 +59,159 @@ function contentPreview(value: unknown): string | undefined {
   );
 }
 
+function stripAnsi(value: string): string {
+  return value.replace(/\u001B\[[0-?]*[ -/]*[@-~]/g, '');
+}
+
+/** Extracts a readable result while preserving line breaks for code previews. */
+function resultText(value: unknown, depth = 0): string | undefined {
+  if (depth > 5 || value === null || value === undefined) {
+    return undefined;
+  }
+
+  if (typeof value === 'string') {
+    const text = redactSecrets(stripAnsi(value).replace(/\r\n?/g, '\n')).trim();
+    return text || undefined;
+  }
+
+  if (typeof value === 'number' || typeof value === 'boolean') {
+    return String(value);
+  }
+
+  if (Array.isArray(value)) {
+    const parts = value
+      .map((item) => resultText(item, depth + 1))
+      .filter((item): item is string => Boolean(item));
+    return parts.length ? parts.join('\n') : undefined;
+  }
+
+  const object = objectValue(value);
+  if (!object) {
+    return undefined;
+  }
+
+  const objectType = textValue(object.type);
+  if (
+    objectType &&
+    objectType !== 'text' &&
+    objectType !== 'json' &&
+    objectType !== 'tool_result' &&
+    object.source
+  ) {
+    return `[${objectType} 结果已省略]`;
+  }
+
+  const stdout = resultText(object.stdout, depth + 1);
+  const stderr = resultText(object.stderr, depth + 1);
+  if (stdout || stderr) {
+    return [stdout, stderr ? `[stderr]\n${stderr}` : undefined]
+      .filter((item): item is string => Boolean(item))
+      .join('\n');
+  }
+
+  for (const key of [
+    'text',
+    'content',
+    'output',
+    'result',
+    'message',
+    'error',
+  ]) {
+    const nested = resultText(object[key], depth + 1);
+    if (nested) {
+      return nested;
+    }
+  }
+
+  try {
+    const serialized = JSON.stringify(object, null, 2);
+    return serialized
+      ? redactSecrets(stripAnsi(serialized)).trim() || undefined
+      : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function codeBlock(value: string): string {
+  let longestBacktickRun = 0;
+  for (const match of value.matchAll(/`+/g)) {
+    longestBacktickRun = Math.max(longestBacktickRun, match[0].length);
+  }
+  const fence = '`'.repeat(Math.max(3, longestBacktickRun + 1));
+  return `${fence}text\n${value}\n${fence}\n\n`;
+}
+
+function resultMetrics(value: string): string {
+  return `${value.split('\n').length} 行，${value.length} 字符`;
+}
+
+function resultBody(value: string): string {
+  const lines = value.split('\n');
+  const isInline =
+    value.length <= INLINE_RESULT_MAX_CHARS &&
+    lines.length <= INLINE_RESULT_MAX_LINES;
+  if (isInline) {
+    return codeBlock(value);
+  }
+
+  const head = lines.slice(0, RESULT_PREVIEW_HEAD_LINES);
+  const tail = lines.slice(-RESULT_PREVIEW_TAIL_LINES);
+  const omittedLines = Math.max(0, lines.length - head.length - tail.length);
+  const previewLines = omittedLines
+    ? [
+        ...head,
+        `… 中间 ${omittedLines} 行已折叠，避免大段结果刷屏 …`,
+        ...tail,
+      ]
+    : lines;
+  let preview = previewLines.join('\n');
+  if (preview.length > RESULT_PREVIEW_MAX_CHARS) {
+    preview = `${preview.slice(0, RESULT_PREVIEW_MAX_CHARS)}\n… 预览已截断 …`;
+  }
+
+  return `<details>\n<summary>查看结果预览（${resultMetrics(value)}）</summary>\n\n${codeBlock(preview)}</details>\n\n`;
+}
+
+function toolResultNotice(
+  toolName: string,
+  failed: boolean,
+  value: unknown,
+): string {
+  const text = resultText(value);
+  if (!text) {
+    return notice(`工具 \`${toolName}\` ${failed ? '失败' : '已完成'}。`);
+  }
+
+  const summary = failed ? contentPreview(value) : undefined;
+  const header = `工具 \`${toolName}\` ${failed ? '失败' : '已完成'}（${resultMetrics(text)}）${
+    summary ? `：${summary}` : '。'
+  }`;
+  return `${notice(header)}${resultBody(text)}`;
+}
+
 function notice(message: string): string {
   return `> **Qoder**：${message}\n\n`;
+}
+
+function planNotice(taskDescription?: string): string {
+  const task = taskDescription
+    ? `执行子任务：${taskDescription}`
+    : '按需调用工具并核对结果';
+  return [
+    '> **Qoder**：执行计划',
+    '> 1. 分析请求与上下文',
+    `> 2. ${task}`,
+    '> 3. 汇总结果并回复',
+    '',
+    '',
+  ].join('\n');
 }
 
 function redactSecrets(value: string): string {
   return value
     .replace(/\bpt-[A-Za-z0-9_-]+\b/g, '[redacted-token]')
+    .replace(/\bBearer\s+[A-Za-z0-9._~+\/-]+=*/gi, 'Bearer [redacted]')
     .replace(
       /\b((?:api[-_ ]?key|access[-_ ]?token|password|passwd|secret|authorization))\s*[:=]\s*([^\s,;]+)/gi,
       '$1=[redacted]',
@@ -127,11 +279,17 @@ export class QoderActivityTracker {
   private readonly completedTools = new Set<string>();
   private readonly toolInputBuffers = new Map<string, string>();
   private thinkingActive = false;
+  private thinkingRound = 0;
   private lastProgressKey: string | undefined;
   private activeToolId: string | undefined;
+  private activeTaskDescription: string | undefined;
+  private planShown = false;
+  private startedToolCount = 0;
+  private completedToolCount = 0;
 
   public begin(): string {
     this.thinkingActive = true;
+    this.thinkingRound = 1;
     return notice('已接收请求，正在分析……');
   }
 
@@ -246,7 +404,16 @@ export class QoderActivityTracker {
       return;
     }
     this.thinkingActive = true;
-    notices.push(notice('正在分析请求……'));
+    this.thinkingRound += 1;
+    if (this.thinkingRound === 1) {
+      notices.push(notice('正在分析请求……'));
+      return;
+    }
+    notices.push(
+      notice(
+        `进度摘要：第 ${this.thinkingRound} 轮分析，已完成 ${this.completedToolCount} 个工具，继续判断下一步……`,
+      ),
+    );
   }
 
   private startTool(block: JsonObject | undefined, notices: string[]): void {
@@ -261,7 +428,23 @@ export class QoderActivityTracker {
     this.thinkingActive = false;
     if (!this.startedTools.has(toolId)) {
       this.startedTools.add(toolId);
-      notices.push(notice(`调用工具 \`${toolName}\`……`));
+      this.startedToolCount += 1;
+      this.ensurePlan(notices);
+      const detail = toolDetail(toolName, block.input);
+      if (detail) {
+        this.detailedTools.add(toolId);
+        notices.push(
+          notice(
+            `进度摘要：步骤 ${this.startedToolCount}，调用工具 \`${toolName}\`……\n\n${detail}`,
+          ),
+        );
+      } else {
+        notices.push(
+          notice(
+            `进度摘要：步骤 ${this.startedToolCount}，调用工具 \`${toolName}\`……`,
+          ),
+        );
+      }
     }
 
     this.reportToolDetail(toolId, toolName, block.input, notices);
@@ -286,16 +469,10 @@ export class QoderActivityTracker {
       return;
     }
     this.completedTools.add(toolId);
+    this.completedToolCount += 1;
     const toolName = this.toolNames.get(toolId) ?? '工具';
     const failed = block.is_error === true;
-    const summary = failed ? contentPreview(block.content) : undefined;
-    notices.push(
-      notice(
-        `工具 \`${toolName}\` ${failed ? '失败' : '已完成'}${
-          summary ? `：${summary}` : '。'
-        }`,
-      ),
-    );
+    notices.push(toolResultNotice(toolName, failed, block.content));
     this.toolInputBuffers.delete(toolId);
   }
 
@@ -310,9 +487,14 @@ export class QoderActivityTracker {
         );
         break;
       case 'task_started':
+        this.activeTaskDescription = displayText(
+          record.description,
+          '执行子任务',
+        );
+        this.ensurePlan(notices);
         this.pushDistinct(
           `task:${displayText(record.task_id, 'unknown')}:started`,
-          `开始任务：${displayText(record.description, '执行子任务')}`,
+          `进度摘要：开始任务「${this.activeTaskDescription}」`,
           notices,
         );
         break;
@@ -320,20 +502,22 @@ export class QoderActivityTracker {
         const summary = textValue(record.summary);
         const tool = textValue(record.last_tool_name);
         if (summary || tool) {
+          this.ensurePlan(notices);
           this.pushDistinct(
             `task:${displayText(record.task_id, 'unknown')}:${summary ?? tool}`,
             summary
-              ? `任务进度：${displayText(summary, '继续执行')}`
-              : `任务进度：正在使用 \`${displayText(tool, '工具').replace(/`/g, "'")}\``,
+              ? `进度摘要：${displayText(summary, '继续执行')}`
+              : `进度摘要：正在使用 \`${displayText(tool, '工具').replace(/`/g, "'")}\``,
             notices,
           );
         }
         break;
       }
       case 'task_notification':
+        this.ensurePlan(notices);
         this.pushDistinct(
           `task:${displayText(record.task_id, 'unknown')}:${subtype}:${record.status}`,
-          `任务${record.status === 'completed' ? '完成' : '未完成'}：${displayText(record.summary, '子任务已结束')}`,
+          `进度摘要：任务${record.status === 'completed' ? '完成' : '未完成'}：${displayText(record.summary, '子任务已结束')}`,
           notices,
         );
         break;
@@ -387,11 +571,27 @@ export class QoderActivityTracker {
   private consumeResult(record: JsonObject, notices: string[]): void {
     if (record.subtype === 'success') {
       const turns = displayText(record.num_turns, '未知');
-      notices.push(notice(`完成，共 ${turns} 轮。`));
+      notices.push(
+        notice(
+          `执行完成：共 ${turns} 轮，已完成 ${this.completedToolCount} 个工具。`,
+        ),
+      );
       return;
     }
 
-    notices.push(notice(`执行未完成（${displayText(record.subtype, '未知原因')}）。`));
+    notices.push(
+      notice(
+        `执行未完成（${displayText(record.subtype, '未知原因')}），已完成 ${this.completedToolCount} 个工具。`,
+      ),
+    );
+  }
+
+  private ensurePlan(notices: string[]): void {
+    if (this.planShown) {
+      return;
+    }
+    this.planShown = true;
+    notices.push(planNotice(this.activeTaskDescription));
   }
 
   private pushDistinct(key: string, message: string, notices: string[]): void {

@@ -30,7 +30,8 @@ Qoder Agent SDK ── 企业版 Qoder 服务
 - 根据模型可用信息选择最大的上下文窗口，不再统一固定为 123K。
 - 将当前 Chat 消息和第一个受信任工作区转发给 Qoder Agent SDK。
 - 支持 Qoder 的文本流、工具循环、取消请求、用量查询和权限模式。
-- 在 Chat 中显示可审计的活动摘要：分析状态、工具操作、脱敏后的命令摘要、失败、重试和完成状态。
+- 第一次执行工具或子任务时显示执行计划，后续显示轮次、步骤和任务进度摘要，避免连续刷出重复的“正在分析”。
+- 在 Chat 中显示可审计的活动摘要：分析状态、工具操作、脱敏后的命令摘要、工具结果、失败、重试和完成状态。小结果直接展示；大结果只展示首尾预览并放入折叠区，避免读取大文件时刷屏。
 
 ## 当前边界
 
@@ -72,7 +73,7 @@ npm run package
 | `qoderBridge.permissionMode` | `auto` | Qoder 工具权限模式。 |
 | `qoderBridge.maxTurns` | `30` | 单次请求最多执行的 Agent 循环轮数。 |
 | `qoderBridge.includePartialMessages` | `true` | 尽可能把流式文本增量显示到 Chat。 |
-| `qoderBridge.showActivity` | `true` | 是否显示分析、工具、任务、重试和完成状态摘要。 |
+| `qoderBridge.showActivity` | `true` | 是否显示分析、工具、任务、结果、重试和完成状态摘要。 |
 
 ## 开发和验证
 

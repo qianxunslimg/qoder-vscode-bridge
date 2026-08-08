@@ -2,7 +2,7 @@
   "name": "qoder-vscode-bridge",
   "displayName": "Qoder Model Provider for Copilot Chat",
   "description": "Use Qoder Agent SDK models from VS Code's native Chat model picker.",
-  "version": "0.0.5",
+  "version": "0.0.6",
   "publisher": "qianxunslimg",
   "license": "MIT",
   "repository": {
@@ -93,7 +93,7 @@
         "qoderBridge.showActivity": {
           "type": "boolean",
           "default": true,
-          "description": "Show Qoder analysis, tool, task, and retry activity in Copilot Chat. Raw hidden reasoning is never displayed."
+          "description": "Show Qoder plan, progress, tool results, task, and retry activity in Copilot Chat. Raw hidden reasoning is never displayed."
         }
       }
     }
