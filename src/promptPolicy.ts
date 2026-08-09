@@ -3,13 +3,15 @@ export interface PromptEntry {
   readonly text: string;
 }
 
-export const DEFAULT_PROMPT_CHAR_BUDGET = 120_000;
+export const DEFAULT_PROMPT_CHAR_BUDGET = 48_000;
+const MAX_ASSISTANT_ENTRY_CHARS = 12_000;
 
 const COPILOT_HOST_MARKERS = [
   'You are an expert AI programming assistant',
   'When asked for your name, you must respond',
   'Follow Microsoft content policies',
   '<instructions>',
+  '<context>',
   '<reminderInstructions>',
 ];
 
@@ -22,14 +24,17 @@ const USER_REQUEST_PATTERN = /<userRequest>\s*([\s\S]*?)\s*<\/userRequest>/gi;
  * untouched.
  */
 export function stripCopilotHostInstructions(text: string): string {
+  const requests = [...text.matchAll(USER_REQUEST_PATTERN)];
+  if (requests.length === 0) {
+    return text;
+  }
   const markerCount = COPILOT_HOST_MARKERS.filter((marker) =>
     text.includes(marker),
   ).length;
-  if (markerCount < 2) {
+  if (markerCount < 1) {
     return text;
   }
 
-  const requests = [...text.matchAll(USER_REQUEST_PATTERN)];
   const latestRequest = requests.at(-1)?.[1]?.trim();
   return latestRequest || '[Copilot host instructions omitted]';
 }
@@ -49,10 +54,20 @@ export function compactPromptEntries(
   }
 
   const normalized = entries
-    .map((entry) => ({
-      label: entry.label.trim() || 'user',
-      text: stripCopilotHostInstructions(entry.text).trim(),
-    }))
+    .map((entry) => {
+      const label = entry.label.trim() || 'user';
+      let text = stripCopilotHostInstructions(entry.text).trim();
+      if (
+        label.startsWith('assistant') &&
+        text.length > MAX_ASSISTANT_ENTRY_CHARS
+      ) {
+        text = [
+          '[Earlier assistant activity omitted]',
+          text.slice(-MAX_ASSISTANT_ENTRY_CHARS),
+        ].join('\n');
+      }
+      return { label, text };
+    })
     .filter((entry) => entry.text.length > 0);
 
   const kept: PromptEntry[] = [];

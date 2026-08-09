@@ -8,6 +8,7 @@ import {
   type SDKMessage,
 } from '@qoder-ai/qoder-agent-sdk';
 import { z } from 'zod';
+import type { NativeToolDescriptor } from './nativeToolPolicy.js';
 
 export const QODER_READ_FILE_TOOL_NAME = 'qoder_read_file';
 const QODER_MCP_SERVER_NAME = 'qoder-vscode-bridge';
@@ -26,12 +27,6 @@ export interface NativeToolInvocation {
   readonly callId: string;
   readonly name: string;
   readonly input: Record<string, unknown>;
-}
-
-export interface NativeToolDescriptor {
-  readonly name: string;
-  readonly description: string;
-  readonly inputSchema?: object;
 }
 
 export type NativeSessionBoundary =
@@ -446,20 +441,14 @@ export class NativeQoderSession {
       ),
     });
 
-    const mapping = proxyTools
-      .map(
-        (descriptor) =>
-          `- ${descriptor.proxyName} -> host tool ${descriptor.name}: ${descriptor.description}`,
-      )
-      .join('\n');
-
     this.q = query({
       prompt: [
         options.prompt,
         '',
-        'The following tools are host proxies. Use the proxy names exactly as listed; do not call or simulate any other tool.',
-        mapping,
+        'Tools whose names start with qoder_native_ are VS Code host proxies. Use only those proxy names when a tool is necessary; do not call or simulate Qoder built-in tools.',
         'The host, not Qoder, executes the operation and returns its result.',
+        'Do not use tools for greetings, casual conversation, or questions that can be answered from the current context.',
+        'For a task that needs tools, briefly state one concrete plan sentence before the first call. Do not repeat generic progress narration between calls because VS Code renders tool activity.',
         'If the host returns a tool error, correct the arguments and retry the same proxy when appropriate.',
         'After the tool result is available, return the concise final answer to the user.',
       ].join('\n'),
@@ -496,13 +485,13 @@ export class NativeQoderSession {
       throw new Error(`Qoder native tool session has no pending call ${result.callId}.`);
     }
     this.pendingCalls.delete(result.callId);
-    progress.report(
-      new vscode.LanguageModelTextPart(
-        result.isError
-          ? '**Qoder**：进度摘要：工具返回错误，正在把错误交回 Qoder 处理……\n\n'
-          : '**Qoder**：进度摘要：已收到工具结果，正在继续分析……\n\n',
-      ),
-    );
+    if (result.isError) {
+      progress.report(
+        new vscode.LanguageModelTextPart(
+          '工具执行失败，Qoder 正在根据错误决定是否重试。\n\n',
+        ),
+      );
+    }
     pending.result.resolve({
       content: [{ type: 'text', text: result.text || '(empty tool result)' }],
       isError: result.isError,
@@ -610,11 +599,6 @@ export class NativeQoderSession {
           callId: `${NATIVE_CALL_ID_PREFIX}${qoderInvocation.callId}`,
         };
         this.pendingCalls.set(invocation.callId, proxyRequest);
-        progress.report(
-          new vscode.LanguageModelTextPart(
-            `**Qoder**：进度摘要：步骤 ${this.toolCallCount}，调用工具 \`${proxy.name}\`，等待 VS Code 执行结果……\n\n`,
-          ),
-        );
         return { kind: 'tool_call', invocation };
       }
 

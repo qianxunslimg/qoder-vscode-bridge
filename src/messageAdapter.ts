@@ -15,19 +15,11 @@ function partToText(part: unknown): string {
   }
 
   if (part instanceof vscode.LanguageModelToolCallPart) {
-    return `[tool call ${part.name} ${jsonForPrompt(part.input)}]`;
+    return '';
   }
 
   if (part instanceof vscode.LanguageModelToolResultPart) {
-    const content = part.content
-      .map((item) => {
-        if (item instanceof vscode.LanguageModelTextPart) {
-          return item.value;
-        }
-        return jsonForPrompt(item);
-      })
-      .join('');
-    return `[tool result ${part.callId}] ${content}`;
+    return '';
   }
 
   if (part instanceof vscode.LanguageModelDataPart) {
@@ -70,8 +62,8 @@ export function messagesToPrompt(
     .join('\n\n');
   return [
     'You are Qoder, responding through a VS Code language model provider.',
-    'Use the current workspace as the working directory. When the user asks for code changes, you may inspect and modify files and run appropriate checks using your available Qoder tools.',
-    'Return a concise final response describing the work and validation after completing the task.',
+    'Answer greetings and ordinary conversation directly without inspecting the workspace.',
+    'For coding tasks, use the current workspace and its tools only when needed. After making changes, concisely report what changed and how it was validated.',
     '',
     transcript,
   ].join('\n');

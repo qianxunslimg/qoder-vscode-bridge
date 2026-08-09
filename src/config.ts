@@ -7,6 +7,7 @@ export interface BridgeConfig {
   readonly includePartialMessages: boolean;
   readonly showActivity: boolean;
   readonly nativeToolLoop: boolean;
+  readonly maxNativeTools: number;
 }
 
 const PERMISSION_MODES: readonly PermissionMode[] = [
@@ -32,6 +33,10 @@ export function readConfig(): BridgeConfig {
     1,
     Math.min(100, configuration.get<number>('maxTurns', 30)),
   );
+  const maxNativeTools = Math.max(
+    8,
+    Math.min(128, configuration.get<number>('maxNativeTools', 48)),
+  );
 
   return {
     permissionMode,
@@ -42,5 +47,6 @@ export function readConfig(): BridgeConfig {
     ),
     showActivity: configuration.get<boolean>('showActivity', true),
     nativeToolLoop: configuration.get<boolean>('nativeToolLoop', true),
+    maxNativeTools,
   };
 }

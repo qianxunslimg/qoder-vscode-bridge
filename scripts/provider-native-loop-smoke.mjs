@@ -61,28 +61,30 @@ const userMessage = {
     ),
   ],
 };
+const hostToolNames = [
+  'Agent',
+  'AskUserQuestion',
+  'Bash',
+  'Edit',
+  'Glob',
+  'Grep',
+  'ImageGen',
+  'ImageSearch',
+  'NotebookEdit',
+  'Read',
+  'Skill',
+  'TaskCreate',
+  'TaskGet',
+  'TaskUpdate',
+  'TaskList',
+  'WebFetch',
+  'WebSearch',
+  'Write',
+  'qoder_read_file',
+  ...Array.from({ length: 72 }, (_, index) => `OptionalProviderTool${index}`),
+];
 const options = {
-  tools: [
-    'Agent',
-    'AskUserQuestion',
-    'Bash',
-    'Edit',
-    'Glob',
-    'Grep',
-    'ImageGen',
-    'ImageSearch',
-    'NotebookEdit',
-    'Read',
-    'Skill',
-    'TaskCreate',
-    'TaskGet',
-    'TaskUpdate',
-    'TaskList',
-    'WebFetch',
-    'WebSearch',
-    'Write',
-    'qoder_read_file',
-  ].map((name) => ({
+  tools: hostToolNames.map((name) => ({
     name,
     description:
       name === 'Bash'
@@ -116,6 +118,34 @@ const options = {
 };
 
 try {
+  const greetingProgress = progressRecorder();
+  await provider.provideLanguageModelChatResponse(
+    model,
+    [
+      {
+        role: vscode.LanguageModelChatMessageRole.User,
+        name: undefined,
+        content: [
+          new vscode.LanguageModelTextPart(
+            '你好。这只是普通对话，不要使用任何工具，只回复 GREETING_OK。',
+          ),
+        ],
+      },
+    ],
+    options,
+    greetingProgress,
+    token(),
+  );
+  const greetingToolCalls = greetingProgress.parts.filter(
+    (part) => part instanceof vscode.LanguageModelToolCallPart,
+  );
+  const greetingText = greetingProgress.parts
+    .filter((part) => part instanceof vscode.LanguageModelTextPart)
+    .map((part) => part.value)
+    .join('');
+  assert.equal(greetingToolCalls.length, 0);
+  assert.match(greetingText, /GREETING_OK/);
+
   const firstProgress = progressRecorder();
   await provider.provideLanguageModelChatResponse(
     model,
@@ -126,6 +156,14 @@ try {
   );
   const toolCalls = firstProgress.parts.filter(
     (part) => part instanceof vscode.LanguageModelToolCallPart,
+  );
+  const firstText = firstProgress.parts
+    .filter((part) => part instanceof vscode.LanguageModelTextPart)
+    .map((part) => part.value)
+    .join('');
+  assert.doesNotMatch(
+    firstText,
+    /已启用 VS Code 原生工具循环|进度摘要：步骤|等待 VS Code 执行结果/,
   );
   assert.equal(toolCalls.length, 1);
   const [toolCall] = toolCalls;
@@ -167,10 +205,12 @@ try {
     .map((part) => part.value)
     .join('');
   assert.match(finalText, /PROVIDER_NATIVE_LOOP_OK/);
+  assert.doesNotMatch(finalText, /已收到工具结果|正在继续分析/);
 
   console.log(
     JSON.stringify({
       marker: 'PROVIDER_NATIVE_TOOL_LOOP_OK',
+      greetingToolCalls: greetingToolCalls.length,
       toolCalls: toolCalls.length,
       toolName: toolCall.name,
       availableTools: options.tools.length,

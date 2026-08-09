@@ -26,9 +26,12 @@ import {
   isNativeToolCallId,
   latestNativeToolResult,
   NativeQoderSession,
-  type NativeToolDescriptor,
   type NativeSessionBoundary,
 } from './nativeToolLoop.js';
+import {
+  selectNativeTools,
+  type NativeToolDescriptor,
+} from './nativeToolPolicy.js';
 import { TokenStore } from './tokenStore.js';
 
 const CATALOG_CACHE_TTL_MS = 5 * 60 * 1000;
@@ -75,25 +78,6 @@ function resultError(message: SDKResultMessage): string {
     return '';
   }
   return message.errors.join('\n') || 'Qoder returned an execution error.';
-}
-
-function nativeToolDescriptors(
-  tools: readonly vscode.LanguageModelChatTool[] | undefined,
-): NativeToolDescriptor[] {
-  const seen = new Set<string>();
-  const descriptors: NativeToolDescriptor[] = [];
-  for (const candidate of tools ?? []) {
-    if (seen.has(candidate.name)) {
-      continue;
-    }
-    seen.add(candidate.name);
-    descriptors.push({
-      name: candidate.name,
-      description: candidate.description || `Invoke the host tool ${candidate.name}.`,
-      inputSchema: candidate.inputSchema,
-    });
-  }
-  return descriptors;
 }
 
 export class QoderModelProvider
@@ -192,7 +176,7 @@ export class QoderModelProvider
         modelOptions,
         config,
         messages,
-        nativeToolDescriptors(options.tools),
+        selectNativeTools(options.tools, config.maxNativeTools),
         progress,
         token,
       );
@@ -297,22 +281,6 @@ export class QoderModelProvider
     progress: vscode.Progress<vscode.LanguageModelResponsePart>,
     token: vscode.CancellationToken,
   ): Promise<void> {
-    progress.report(
-      new vscode.LanguageModelTextPart(
-        [
-          `**Qoder**：已启用 VS Code 原生工具循环（${nativeTools.length} 个工具）。`,
-          '',
-          '**Qoder**：执行计划',
-          '',
-          '1. 分析请求与上下文',
-          '2. 调用 VS Code 原生工具并等待结果',
-          '3. 汇总结果并回复',
-          '',
-          '**Qoder**：进度摘要：步骤 1，正在分析请求……',
-          '',
-        ].join('\n'),
-      ),
-    );
     const session = new NativeQoderSession({
       pat,
       cwd,
