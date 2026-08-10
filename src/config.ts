@@ -35,7 +35,7 @@ export function readConfig(): BridgeConfig {
   );
   const maxNativeTools = Math.max(
     8,
-    Math.min(128, configuration.get<number>('maxNativeTools', 48)),
+    Math.min(128, configuration.get<number>('maxNativeTools', 91)),
   );
 
   return {

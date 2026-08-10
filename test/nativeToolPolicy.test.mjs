@@ -29,3 +29,19 @@ test('caps optional host tools while retaining core coding tools', () => {
   assert.ok(names.includes('read_file'));
   assert.ok(selected.every((tool) => tool.description.length <= 240));
 });
+
+test('keeps all 91 host tools when using the default limit', () => {
+  const tools = Array.from({ length: 91 }, (_, index) => ({
+    name: `host_tool_${index}`,
+    description: `Host tool ${index}.`,
+    inputSchema: { type: 'object' },
+  }));
+
+  const selected = selectNativeTools(tools, 91);
+
+  assert.equal(selected.length, 91);
+  assert.deepEqual(
+    selected.map((tool) => tool.name),
+    tools.map((tool) => tool.name),
+  );
+});

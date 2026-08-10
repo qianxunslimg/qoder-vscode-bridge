@@ -30,7 +30,7 @@ Qoder Agent SDK ── 企业版 Qoder 服务
 - 根据模型可用信息选择最大的上下文窗口，不再统一固定为 123K。
 - 将当前 Chat 消息和第一个受信任工作区转发给 Qoder Agent SDK。
 - 保留原生模型选择器；当 Copilot Chat 提供 Bash、Read、Edit 等工具时，Qoder 会通过代理把工具调用交给 VS Code 原生工具循环，结果回传后继续同一 Qoder 会话。
-- 原生工具链路会优先选择核心编码工具并限制单次工具数量，工具调用、确认、结果、取消和错误重试交给 VS Code；无工具的普通文本请求继续使用轻量文本路径。
+- 原生工具链路默认保留 VS Code 当前提供的完整工具集合；用户主动调低工具上限时才优先保留核心编码工具。工具调用、确认、结果、取消和错误重试交给 VS Code；无工具的普通文本请求继续使用轻量文本路径。
 - 仍支持 Qoder 的文本流、内部回退循环、取消请求、用量查询和权限模式。
 - 原生链路由 Qoder 在第一次工具调用前给出一句任务相关计划，之后直接使用 VS Code 原生工具卡，不再重复输出“调用工具/收到结果”等成功态文本；失败时保留重试提示。
 - 内部回退链路继续显示可审计的活动摘要：分析状态、工具操作、脱敏后的命令摘要和有限结果预览。
@@ -79,7 +79,7 @@ npm run package
 | `qoderBridge.includePartialMessages` | `true` | 尽可能把流式文本增量显示到 Chat。 |
 | `qoderBridge.showActivity` | `true` | 是否显示分析、工具、任务、结果、重试和完成状态摘要。 |
 | `qoderBridge.nativeToolLoop` | `true` | 是否把 Chat 请求提供的 Bash、Read、Edit 等工具交给 VS Code 原生工具循环。 |
-| `qoderBridge.maxNativeTools` | `48` | 单次请求最多暴露给 Qoder 的宿主工具数；核心编码工具优先，用于降低提示大小和首轮延迟。 |
+| `qoderBridge.maxNativeTools` | `91` | 单次请求最多暴露给 Qoder 的宿主工具数；默认覆盖 VS Code 当前完整工具集合。主动调低时核心编码工具优先。 |
 
 ## 开发和验证
 
