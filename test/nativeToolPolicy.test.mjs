@@ -45,3 +45,32 @@ test('keeps all 91 host tools when using the default limit', () => {
     tools.map((tool) => tool.name),
   );
 });
+
+test('prefers the host read_file over the workspace-only fallback', () => {
+  const selected = selectNativeTools([
+    {
+      name: 'qoder_read_file',
+      description: 'Read a UTF-8 file inside the current workspace.',
+      inputSchema: { type: 'object' },
+    },
+    {
+      name: 'read_file',
+      description: 'Read files and VS Code chat-session resources.',
+      inputSchema: { type: 'object' },
+    },
+  ], 91);
+
+  assert.deepEqual(selected.map((tool) => tool.name), ['read_file']);
+});
+
+test('keeps qoder_read_file when the host has no native read_file', () => {
+  const selected = selectNativeTools([
+    {
+      name: 'qoder_read_file',
+      description: 'Read a UTF-8 file inside the current workspace.',
+      inputSchema: { type: 'object' },
+    },
+  ], 91);
+
+  assert.deepEqual(selected.map((tool) => tool.name), ['qoder_read_file']);
+});

@@ -51,12 +51,21 @@ export function selectNativeTools(
   tools: readonly NativeToolDescriptor[] | undefined,
   limit: number,
 ): NativeToolDescriptor[] {
+  const candidates = tools ?? [];
+  // qoder_read_file was introduced as the first vertical-slice fallback. The
+  // host read_file is strictly more capable in Agent mode because it can also
+  // resolve Copilot's chat-session-resources files for large tool results.
+  // Never make the model choose between two overlapping read tools.
+  const hasHostReadFile = candidates.some((tool) => tool.name === 'read_file');
   const seen = new Set<string>();
   const core: NativeToolDescriptor[] = [];
   const optional: NativeToolDescriptor[] = [];
 
-  for (const candidate of tools ?? []) {
+  for (const candidate of candidates) {
     if (!candidate.name || seen.has(candidate.name)) {
+      continue;
+    }
+    if (hasHostReadFile && candidate.name === 'qoder_read_file') {
       continue;
     }
     seen.add(candidate.name);

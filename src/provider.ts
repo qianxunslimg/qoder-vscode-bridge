@@ -26,6 +26,9 @@ import {
   isNativeToolCallId,
   latestNativeToolResult,
   NativeQoderSession,
+  terminalNotificationToolResult,
+  type NativeToolInvocation,
+  type NativeToolResult,
   type NativeSessionBoundary,
 } from './nativeToolLoop.js';
 import {
@@ -40,6 +43,11 @@ const FALLBACK_CACHE_TTL_MS = 5 * 1000;
 interface CatalogLoadResult {
   readonly models: QoderModelInformation[];
   readonly loadedFromQoder: boolean;
+}
+
+interface TrackedNativeSession {
+  readonly session: NativeQoderSession;
+  readonly invocation: NativeToolInvocation;
 }
 
 function deduplicateModels(
@@ -91,7 +99,7 @@ export class QoderModelProvider
   private cacheExpiresAt = 0;
   private inFlight: Promise<CatalogLoadResult> | undefined;
   private readonly metadataSession = new QoderMetadataSession();
-  private readonly nativeSessions = new Map<string, NativeQoderSession>();
+  private readonly nativeSessions = new Map<string, TrackedNativeSession>();
 
   public readonly onDidChangeLanguageModelChatInformation =
     this.changeEmitter.event;
@@ -154,19 +162,38 @@ export class QoderModelProvider
       if (!isNativeToolCallId(nativeToolResult.callId)) {
         throw new Error('Invalid Qoder native tool call id. Retry the request.');
       }
-      const session = this.nativeSessions.get(nativeToolResult.callId);
-      if (!session) {
+      const tracked = this.nativeSessions.get(nativeToolResult.callId);
+      if (!tracked) {
         throw new Error(
           'The Qoder native tool session expired before its result was returned. Retry the request.',
         );
       }
       await this.continueNativeSession(
-        session,
+        tracked.session,
         nativeToolResult,
         progress,
         token,
       );
       return;
+    }
+
+    if (config.nativeToolLoop) {
+      for (const tracked of this.nativeSessions.values()) {
+        const terminalResult = terminalNotificationToolResult(
+          messages,
+          tracked.invocation,
+        );
+        if (!terminalResult) {
+          continue;
+        }
+        await this.continueNativeSession(
+          tracked.session,
+          terminalResult,
+          progress,
+          token,
+        );
+        return;
+      }
     }
 
     if (config.nativeToolLoop && hasNativeToolLoopTools(options.tools)) {
@@ -265,8 +292,8 @@ export class QoderModelProvider
   public dispose(): void {
     this.changeEmitter.dispose();
     void this.metadataSession.close();
-    for (const session of this.nativeSessions.values()) {
-      void session.cancel('Qoder native tool provider disposed.');
+    for (const tracked of this.nativeSessions.values()) {
+      void tracked.session.cancel('Qoder native tool provider disposed.');
     }
     this.nativeSessions.clear();
   }
@@ -313,7 +340,7 @@ export class QoderModelProvider
 
   private async continueNativeSession(
     session: NativeQoderSession,
-    result: NonNullable<ReturnType<typeof latestNativeToolResult>>,
+    result: NativeToolResult,
     progress: vscode.Progress<vscode.LanguageModelResponsePart>,
     token: vscode.CancellationToken,
   ): Promise<void> {
@@ -349,13 +376,16 @@ export class QoderModelProvider
           boundary.invocation.input,
         ),
       );
-      this.nativeSessions.set(boundary.invocation.callId, session);
+      this.nativeSessions.set(boundary.invocation.callId, {
+        session,
+        invocation: boundary.invocation,
+      });
     }
   }
 
   private removeNativeSession(session: NativeQoderSession): void {
     for (const [callId, candidate] of this.nativeSessions) {
-      if (candidate === session) {
+      if (candidate.session === session) {
         this.nativeSessions.delete(callId);
       }
     }

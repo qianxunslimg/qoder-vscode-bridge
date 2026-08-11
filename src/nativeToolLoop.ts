@@ -167,6 +167,11 @@ function jsonSchemaLiteral(value: unknown): any {
   }
 }
 
+function withJsonSchemaDescription(value: JsonObject, schema: any): any {
+  const description = textValue(value.description)?.trim();
+  return description ? schema.describe(description) : schema;
+}
+
 function jsonSchemaToZod(schema: unknown): any {
   const value = objectValue(schema);
   if (!value) {
@@ -176,53 +181,78 @@ function jsonSchemaToZod(schema: unknown): any {
   const enumValues = arrayValue(value.enum);
   if (enumValues && enumValues.length > 0) {
     if (enumValues.length === 1) {
-      return jsonSchemaLiteral(enumValues[0]);
+      return withJsonSchemaDescription(value, jsonSchemaLiteral(enumValues[0]));
     }
-    return z.union(enumValues.map(jsonSchemaLiteral) as [any, any, ...any[]]);
+    return withJsonSchemaDescription(
+      value,
+      z.union(enumValues.map(jsonSchemaLiteral) as [any, any, ...any[]]),
+    );
   }
 
   const alternatives = arrayValue(value.oneOf ?? value.anyOf);
   if (alternatives && alternatives.length > 0) {
     if (alternatives.length === 1) {
-      return jsonSchemaToZod(alternatives[0]);
+      return withJsonSchemaDescription(
+        value,
+        jsonSchemaToZod(alternatives[0]),
+      );
     }
-    return z.union(
-      alternatives.map(jsonSchemaToZod) as [any, any, ...any[]],
+    return withJsonSchemaDescription(
+      value,
+      z.union(
+        alternatives.map(jsonSchemaToZod) as [any, any, ...any[]],
+      ),
     );
   }
 
   const type = value.type;
   if (Array.isArray(type)) {
     if (type.length === 1) {
-      return jsonSchemaToZod({ type: type[0] });
+      return withJsonSchemaDescription(
+        value,
+        jsonSchemaToZod({ type: type[0] }),
+      );
     }
-    return z.union(
-      type.map((item) => jsonSchemaToZod({ type: item })) as [
-        any,
-        any,
-        ...any[],
-      ],
+    return withJsonSchemaDescription(
+      value,
+      z.union(
+        type.map((item) => jsonSchemaToZod({ type: item })) as [
+          any,
+          any,
+          ...any[],
+        ],
+      ),
     );
   }
 
+  let parsed: any;
   switch (type) {
     case 'string':
-      return z.string();
+      parsed = z.string();
+      break;
     case 'integer':
-      return z.number().int();
+      parsed = z.number().int();
+      break;
     case 'number':
-      return z.number();
+      parsed = z.number();
+      break;
     case 'boolean':
-      return z.boolean();
+      parsed = z.boolean();
+      break;
     case 'array':
-      return z.array(jsonSchemaToZod(value.items));
+      parsed = z.array(jsonSchemaToZod(value.items));
+      break;
     case 'object': {
       const shape = jsonSchemaShape(value);
-      return Object.keys(shape).length > 0 ? z.object(shape) : z.record(z.string(), z.unknown());
+      parsed = Object.keys(shape).length > 0
+        ? z.object(shape)
+        : z.record(z.string(), z.unknown());
+      break;
     }
     default:
-      return z.unknown();
+      parsed = z.unknown();
   }
+  return withJsonSchemaDescription(value, parsed);
 }
 
 function jsonSchemaShape(schema: unknown): Record<string, any> {
@@ -244,13 +274,41 @@ function jsonSchemaShape(schema: unknown): Record<string, any> {
   return shape;
 }
 
-function toolInputShape(schema: object | undefined): Record<string, any> {
+export function nativeToolInputShape(
+  schema: object | undefined,
+): Record<string, any> {
   const shape = jsonSchemaShape(schema);
   // Some private tools omit their schema. Keep their arguments as a generic
   // object rather than silently forcing Qoder to call an empty-argument tool.
   return Object.keys(shape).length > 0
     ? shape
     : { input: z.record(z.string(), z.unknown()).optional() };
+}
+
+/**
+ * Qoder's built-in Bash timeout is expressed in milliseconds, but models can
+ * still emit a small seconds-style value after crossing a provider boundary.
+ * Such sub-second host timeouts immediately background an ordinary sync command
+ * and make VS Code inject a separate terminal-completion turn. Repair only the
+ * unambiguously tiny range and leave explicit async calls untouched.
+ */
+export function normalizeNativeToolInput(
+  name: string,
+  input: Record<string, unknown>,
+): Record<string, unknown> {
+  if (name !== 'run_in_terminal' || input.mode === 'async') {
+    return input;
+  }
+  const timeout = input.timeout;
+  if (
+    typeof timeout !== 'number' ||
+    !Number.isFinite(timeout) ||
+    timeout <= 0 ||
+    timeout >= 1_000
+  ) {
+    return input;
+  }
+  return { ...input, timeout: Math.round(timeout * 1_000) };
 }
 
 function contentParts(value: unknown): JsonObject[] {
@@ -356,6 +414,58 @@ export function latestNativeToolResult(
   return undefined;
 }
 
+interface TerminalCompletionNotification {
+  readonly terminalId: string;
+  readonly output: string;
+}
+
+function latestTerminalCompletionNotification(
+  messages: readonly vscode.LanguageModelChatRequestMessage[],
+): TerminalCompletionNotification | undefined {
+  const message = messages.at(-1);
+  if (!message) {
+    return undefined;
+  }
+  for (let partIndex = message.content.length - 1; partIndex >= 0; partIndex -= 1) {
+    const part = message.content[partIndex];
+    if (!(part instanceof vscode.LanguageModelTextPart)) {
+      continue;
+    }
+    const match = part.value.match(
+      /^\[Terminal ([^\]\r\n]+) notification: command completed\.[^\]]*\]\r?\nTerminal output:\r?\n([\s\S]*)$/,
+    );
+    if (match) {
+      return { terminalId: match[1], output: match[2].trimEnd() };
+    }
+  }
+  return undefined;
+}
+
+/**
+ * VS Code can deliver terminal completion as a synthetic user message before
+ * it invokes a pending get_terminal_output call. Match that notification to
+ * the exact terminal and feed it into the still-live Qoder session instead of
+ * treating it as a new user request.
+ */
+export function terminalNotificationToolResult(
+  messages: readonly vscode.LanguageModelChatRequestMessage[],
+  invocation: NativeToolInvocation,
+): NativeToolResult | undefined {
+  if (invocation.name !== 'get_terminal_output') {
+    return undefined;
+  }
+  const terminalId = textValue(invocation.input.id);
+  const notification = latestTerminalCompletionNotification(messages);
+  if (!terminalId || notification?.terminalId !== terminalId) {
+    return undefined;
+  }
+  return {
+    callId: invocation.callId,
+    text: notification.output || '(terminal completed with no output)',
+    isError: false,
+  };
+}
+
 export function isNativeToolCallId(callId: string): boolean {
   return callId.startsWith(NATIVE_CALL_ID_PREFIX);
 }
@@ -412,9 +522,12 @@ export class NativeQoderSession {
           [
             `Proxy for the VS Code host tool ${descriptor.name}.`,
             descriptor.description,
+            descriptor.name === 'run_in_terminal'
+              ? 'Its timeout field is milliseconds: use at least 10000 for short commands and 120000 or more for builds and tests.'
+              : '',
             'Return the host result to Qoder without executing the operation inside Qoder.',
-          ].join(' '),
-          toolInputShape(descriptor.inputSchema),
+          ].filter(Boolean).join(' '),
+          nativeToolInputShape(descriptor.inputSchema),
           async (input) => {
             const queue = this.proxyRequests.get(descriptor.proxyName);
             if (!queue) {
@@ -422,7 +535,10 @@ export class NativeQoderSession {
             }
             const request = {
               proxyName: descriptor.proxyName,
-              input: input as Record<string, unknown>,
+              input: normalizeNativeToolInput(
+                descriptor.name,
+                input as Record<string, unknown>,
+              ),
               result: deferred<CallToolResult>(),
             };
             queue.push(request);
@@ -594,9 +710,9 @@ export class NativeQoderSession {
           );
         }
         const invocation = {
-          ...qoderInvocation,
           name: proxy.name,
           callId: `${NATIVE_CALL_ID_PREFIX}${qoderInvocation.callId}`,
+          input: proxyRequest.input,
         };
         this.pendingCalls.set(invocation.callId, proxyRequest);
         return { kind: 'tool_call', invocation };
