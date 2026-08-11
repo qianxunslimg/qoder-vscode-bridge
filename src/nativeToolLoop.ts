@@ -485,7 +485,9 @@ export function hasNativeToolLoopTools(
  * Runs Qoder with one MCP proxy per host tool. A proxy never executes the
  * underlying operation: it pauses until VS Code invokes the matching native
  * tool and returns its result. This keeps the Qoder agent loop alive without
- * executing any tool twice.
+ * executing any tool twice. `maxTurns` is passed to the Qoder SDK as an agent
+ * turn limit only: one turn may legitimately request multiple host tools, so
+ * applying the same value as a per-tool limit would terminate valid sessions.
  */
 export class NativeQoderSession {
   private readonly q: Query;
@@ -499,12 +501,9 @@ export class NativeQoderSession {
   private readonly seenToolCalls = new Set<string>();
   private readonly abortController = new AbortController();
   private readonly pumpPromise: Promise<void>;
-  private readonly maxNativeToolCalls: number;
-  private toolCallCount = 0;
   private closed = false;
 
   public constructor(options: NativeSessionOptions) {
-    this.maxNativeToolCalls = Math.max(1, options.maxTurns);
     const proxyTools = options.nativeTools.map((descriptor, index) => ({
       ...descriptor,
       proxyName: proxyNameFor(descriptor.name, index),
@@ -692,13 +691,7 @@ export class NativeQoderSession {
             `Qoder requested unsupported native proxy ${qoderInvocation.name}.`,
           );
         }
-        if (this.toolCallCount >= this.maxNativeToolCalls) {
-          throw new Error(
-            `Qoder requested more than ${this.maxNativeToolCalls} native tool calls; stopping to prevent an unbounded loop.`,
-          );
-        }
         this.seenToolCalls.add(qoderInvocation.callId);
-        this.toolCallCount += 1;
         const queue = this.proxyRequests.get(proxy.proxyName);
         if (!queue) {
           throw new Error(`Missing native proxy queue for ${proxy.proxyName}.`);

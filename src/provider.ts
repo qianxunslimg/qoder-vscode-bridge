@@ -163,18 +163,20 @@ export class QoderModelProvider
         throw new Error('Invalid Qoder native tool call id. Retry the request.');
       }
       const tracked = this.nativeSessions.get(nativeToolResult.callId);
-      if (!tracked) {
-        throw new Error(
-          'The Qoder native tool session expired before its result was returned. Retry the request.',
+      if (tracked) {
+        await this.continueNativeSession(
+          tracked.session,
+          nativeToolResult,
+          progress,
+          token,
         );
+        return;
       }
-      await this.continueNativeSession(
-        tracked.session,
-        nativeToolResult,
-        progress,
-        token,
-      );
-      return;
+      // VS Code can replay the last ToolResult after a provider error or an
+      // extension-host restart. The old in-memory Qoder query cannot be
+      // resumed, so fall through and rebuild a session from the transcript
+      // and current workspace state instead of trapping Try Again in an
+      // unrecoverable "session expired" loop.
     }
 
     if (config.nativeToolLoop) {

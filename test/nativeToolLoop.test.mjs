@@ -8,6 +8,7 @@ import '../scripts/vscode-mock-require.cjs';
 const require = createRequire(import.meta.url);
 const vscode = require('vscode');
 const {
+  NativeQoderSession,
   nativeToolInputShape,
   normalizeNativeToolInput,
   terminalNotificationToolResult,
@@ -180,5 +181,127 @@ test('provider resumes the original Qoder session on a raced terminal notificati
   });
   assert.equal(closeCount, 1);
   assert.equal(provider.nativeSessions.size, 0);
+  provider.dispose();
+});
+
+test('does not apply maxTurns as a second per-tool call limit', async () => {
+  const proxyName = 'qoder_native_0_read_file';
+  const qoderCallId = 'toolu_31';
+  const proxyRequest = {
+    proxyName,
+    input: { filePath: 'README.md' },
+    result: {
+      promise: Promise.resolve(),
+      resolve() {},
+      reject() {},
+    },
+  };
+  const session = Object.create(NativeQoderSession.prototype);
+  session.messages = {
+    async next() {
+      return {
+        type: 'assistant',
+        message: {
+          content: [
+            {
+              type: 'tool_use',
+              id: qoderCallId,
+              name: proxyName,
+              input: proxyRequest.input,
+            },
+          ],
+        },
+      };
+    },
+  };
+  session.seenToolCalls = new Set(
+    Array.from({ length: 30 }, (_, index) => `toolu_${index + 1}`),
+  );
+  session.proxyTools = new Map([
+    [proxyName, { name: 'read_file', proxyName }],
+  ]);
+  session.proxyRequests = new Map([
+    [proxyName, { async next() { return proxyRequest; } }],
+  ]);
+  session.pendingCalls = new Map();
+  session.maxNativeToolCalls = 30;
+  session.toolCallCount = 30;
+
+  const boundary = await session.consumeUntilBoundary({ report() {} });
+
+  assert.deepEqual(boundary, {
+    kind: 'tool_call',
+    invocation: {
+      callId: `qoder-native-${qoderCallId}`,
+      name: 'read_file',
+      input: { filePath: 'README.md' },
+    },
+  });
+});
+
+test('provider restarts from transcript when a native result has no live session', async () => {
+  const callId = 'qoder-native-stale-call';
+  const messages = [
+    {
+      role: vscode.LanguageModelChatMessageRole.User,
+      content: [new vscode.LanguageModelTextPart('Finish the coding task.')],
+    },
+    {
+      role: vscode.LanguageModelChatMessageRole.Assistant,
+      content: [
+        new vscode.LanguageModelToolCallPart(
+          callId,
+          'read_file',
+          { filePath: 'README.md' },
+        ),
+      ],
+    },
+    {
+      role: vscode.LanguageModelChatMessageRole.User,
+      content: [
+        new vscode.LanguageModelToolResultPart(
+          callId,
+          [new vscode.LanguageModelTextPart('previous tool result')],
+        ),
+      ],
+    },
+  ];
+  let restartCount = 0;
+  const provider = new QoderModelProvider({
+    async get() {
+      return 'fake-token';
+    },
+  });
+  provider.startNativeSession = async (...args) => {
+    restartCount += 1;
+    assert.equal(args[4], messages);
+  };
+
+  await provider.provideLanguageModelChatResponse(
+    {
+      id: 'ultimate',
+      name: 'Ultimate',
+      maxInputTokens: 1_000_000,
+      maxOutputTokens: 8_000,
+      isBYOK: true,
+      isUserSelectable: true,
+      capabilities: { toolCalling: true },
+    },
+    messages,
+    {
+      tools: [
+        {
+          name: 'read_file',
+          description: 'Read a file.',
+          inputSchema: { type: 'object' },
+        },
+      ],
+      toolMode: undefined,
+    },
+    { report() {} },
+    cancellationToken(),
+  );
+
+  assert.equal(restartCount, 1);
   provider.dispose();
 });
