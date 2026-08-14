@@ -8,6 +8,7 @@ import '../scripts/vscode-mock-require.cjs';
 const require = createRequire(import.meta.url);
 const vscode = require('vscode');
 const {
+  buildNativePrompt,
   NativeQoderSession,
   nativeToolInputShape,
   normalizeNativeToolInput,
@@ -23,6 +24,38 @@ function cancellationToken() {
     },
   };
 }
+
+test('does not stringify an image prompt when adding native tool instructions', async () => {
+  const prompt = (await import('../out/messageAdapter.js')).messagesToPrompt([
+    {
+      role: vscode.LanguageModelChatMessageRole.User,
+      content: [
+        new vscode.LanguageModelTextPart('请看这张图'),
+        new vscode.LanguageModelDataPart(
+          new Uint8Array([0, 1, 2, 255]),
+          'image/png',
+        ),
+      ],
+    },
+  ]);
+
+  const nativePrompt = buildNativePrompt(prompt);
+  assert.notEqual(typeof nativePrompt, 'string');
+  const [message] = await (async () => {
+    const result = [];
+    for await (const item of nativePrompt) {
+      result.push(item);
+    }
+    return result;
+  })();
+  const content = message.message.content;
+  assert.ok(content.some((part) => part.type === 'image'));
+  assert.match(
+    content.filter((part) => part.type === 'text').map((part) => part.text).join('\n'),
+    /qoder_native_/,
+  );
+  assert.doesNotMatch(JSON.stringify(content), /\[object AsyncGenerator\]/);
+});
 
 test('preserves host field descriptions in the Qoder proxy schema', () => {
   const shape = nativeToolInputShape({

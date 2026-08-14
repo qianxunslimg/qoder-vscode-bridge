@@ -19,6 +19,13 @@ class LanguageModelToolCallPart {
   }
 }
 
+class LanguageModelDataPart {
+  constructor(data, mimeType) {
+    this.data = data;
+    this.mimeType = mimeType;
+  }
+}
+
 class LanguageModelToolResult {
   constructor(content) {
     this.content = content;
@@ -39,6 +46,7 @@ class EventEmitter {
 
 module.exports = {
   LanguageModelTextPart,
+  LanguageModelDataPart,
   LanguageModelToolResultPart,
   LanguageModelToolCallPart,
   LanguageModelToolResult,

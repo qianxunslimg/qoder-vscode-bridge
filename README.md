@@ -29,6 +29,7 @@ Qoder Agent SDK ── 企业版 Qoder 服务
 - 支持 Qwen、Kimi、DeepSeek、GLM、MiniMax 等账号中可用的模型；目录暂时不可用时保留 tier 别名。
 - 根据模型可用信息选择最大的上下文窗口，不再统一固定为 123K。
 - 将当前 Chat 消息和第一个受信任工作区转发给 Qoder Agent SDK。
+- 支持把 VS Code Chat 中粘贴的图片转发给 Qoder；只有账号目录标记为“视觉”的模型会声明图片能力，图片会作为真实多模态输入发送，不再降级成 MIME 占位文本。
 - 保留原生模型选择器；当 Copilot Chat 提供 Bash、Read、Edit 等工具时，Qoder 会通过代理把工具调用交给 VS Code 原生工具循环，结果回传后继续同一 Qoder 会话。
 - 原生工具链路默认保留 VS Code 当前提供的完整工具集合；用户主动调低工具上限时才优先保留核心编码工具。工具调用、确认、结果、取消和错误重试交给 VS Code；无工具的普通文本请求继续使用轻量文本路径。
 - `maxTurns` 只交给 Qoder SDK 约束 Agent 轮数，不再错误地按单个宿主工具调用重复计数；旧工具结果对应的内存会话已结束时，会从当前聊天记录和工作区状态重新建立会话，避免“Try Again”反复报 `session expired`。
@@ -42,6 +43,7 @@ Qoder Agent SDK ── 企业版 Qoder 服务
 
 - 不展示模型的原始隐藏思维链（Chain of Thought）。界面显示的是可审计的过程摘要，不是模型内部推理全文。
 - 当前实现是 Language Model Provider，不提供独立的 `@qoder` Chat Participant 或原生 Qoder Session Target。
+- 图片输入需要选择 Qoder 账号目录中标记为视觉的模型；非视觉模型会在请求开始时给出明确错误，不会假装已经看到了图片。
 - 原生工具委托按 Chat 请求中的工具集合动态建立代理，避免 Qoder SDK 再启动一套同名内置工具；如果请求没有宿主工具，才回退到文本路径。
 - 工具是否可以读取或修改工作区由 Qoder 与 VS Code 宿主共同决定；Qoder 默认使用 `bypassPermissions`，宿主工具确认仍由 VS Code 控制。
 - 作为兜底的 `qoder_read_file` 仍只允许读取当前工作区内的 UTF-8 文件，并由 VS Code 的工具确认 UI 控制是否执行；不会为了读取宿主临时结果而放宽到整个用户目录。

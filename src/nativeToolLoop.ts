@@ -6,8 +6,10 @@ import {
   tool,
   type Query,
   type SDKMessage,
+  type SDKUserMessage,
 } from '@qoder-ai/qoder-agent-sdk';
 import { z } from 'zod';
+import type { QoderPromptInput } from './messageAdapter.js';
 import type { NativeToolDescriptor } from './nativeToolPolicy.js';
 
 export const QODER_READ_FILE_TOOL_NAME = 'qoder_read_file';
@@ -59,8 +61,42 @@ interface NativeSessionOptions {
   readonly permissionMode: Parameters<Query['setPermissionMode']>[0];
   readonly allowDangerouslySkipPermissions: boolean;
   readonly maxTurns: number;
-  readonly prompt: string;
+  readonly prompt: QoderPromptInput;
   readonly nativeTools: readonly NativeToolDescriptor[];
+}
+
+const NATIVE_PROMPT_INSTRUCTIONS = [
+  'Tools whose names start with qoder_native_ are VS Code host proxies. Use only those proxy names when a tool is necessary; do not call or simulate Qoder built-in tools.',
+  'The host, not Qoder, executes the operation and returns its result.',
+  'Do not use tools for greetings, casual conversation, or questions that can be answered from the current context.',
+  'For a task that needs tools, briefly state one concrete plan sentence before the first call. Do not repeat generic progress narration between calls because VS Code renders tool activity.',
+  'If the host returns a tool error, correct the arguments and retry the same proxy when appropriate.',
+  'After the tool result is available, return the concise final answer to the user.',
+].join('\n');
+
+export function buildNativePrompt(prompt: QoderPromptInput): QoderPromptInput {
+  if (typeof prompt === 'string') {
+    return `${prompt}\n\n${NATIVE_PROMPT_INSTRUCTIONS}`;
+  }
+
+  return (async function* nativePrompt(): AsyncIterable<SDKUserMessage> {
+    for await (const message of prompt) {
+      const content = message.message.content;
+      yield {
+        ...message,
+        message: {
+          ...message.message,
+          content:
+            typeof content === 'string'
+              ? `${content}\n\n${NATIVE_PROMPT_INSTRUCTIONS}`
+              : [
+                  ...content,
+                  { type: 'text', text: `\n\n${NATIVE_PROMPT_INSTRUCTIONS}` },
+                ],
+        },
+      };
+    }
+  })();
 }
 
 function deferred<T>(): Deferred<T> {
@@ -557,16 +593,7 @@ export class NativeQoderSession {
     });
 
     this.q = query({
-      prompt: [
-        options.prompt,
-        '',
-        'Tools whose names start with qoder_native_ are VS Code host proxies. Use only those proxy names when a tool is necessary; do not call or simulate Qoder built-in tools.',
-        'The host, not Qoder, executes the operation and returns its result.',
-        'Do not use tools for greetings, casual conversation, or questions that can be answered from the current context.',
-        'For a task that needs tools, briefly state one concrete plan sentence before the first call. Do not repeat generic progress narration between calls because VS Code renders tool activity.',
-        'If the host returns a tool error, correct the arguments and retry the same proxy when appropriate.',
-        'After the tool result is available, return the concise final answer to the user.',
-      ].join('\n'),
+      prompt: buildNativePrompt(options.prompt),
       options: {
         auth: accessToken(options.pat),
         cwd: options.cwd,

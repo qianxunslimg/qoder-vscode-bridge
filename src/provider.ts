@@ -16,7 +16,11 @@ import {
   type QoderModelDescriptor,
 } from './modelCatalog.js';
 import { QoderMetadataSession } from './modelCatalogService.js';
-import { estimateTokens, messagesToPrompt } from './messageAdapter.js';
+import {
+  estimateTokens,
+  hasImageInput,
+  messagesToPrompt,
+} from './messageAdapter.js';
 import {
   descriptorToInformation,
   type QoderModelInformation,
@@ -150,6 +154,11 @@ export class QoderModelProvider
     const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
     if (!workspaceFolder) {
       throw new Error('Open a workspace folder before using Qoder.');
+    }
+    if (hasImageInput(messages) && model.capabilities.imageInput !== true) {
+      throw new Error(
+        'The selected Qoder model does not support image input. Select a model marked as vision-capable and retry.',
+      );
     }
 
     const abortController = new AbortController();
