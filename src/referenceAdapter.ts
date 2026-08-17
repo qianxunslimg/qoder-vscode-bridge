@@ -8,6 +8,13 @@ interface JsonObject {
 
 export interface ReferenceRenderOptions {
   readonly maxInlineChars?: number;
+  readonly activeEditorReference?: ActiveEditorReference;
+}
+
+export interface ActiveEditorReference {
+  readonly resource: string;
+  readonly range?: string;
+  readonly text?: string;
 }
 
 export interface UnknownImagePart {
@@ -379,6 +386,22 @@ function formatStructuredData(
   const range = rangeFromUnknown(value);
   const text = textFromUnknown(value);
   return formatAttachment(resource, range, text, options);
+}
+
+export function renderActiveEditorReference(
+  reference: ActiveEditorReference,
+  options: ReferenceRenderOptions = {},
+): string | undefined {
+  const attachment = formatAttachment(
+    reference.resource,
+    reference.range,
+    reference.text,
+    options,
+  );
+  const label = reference.text?.trim()
+    ? '[Active editor selection]'
+    : '[Active editor file]';
+  return attachment ? `${label}\n${attachment}` : undefined;
 }
 
 export function renderDataPart(

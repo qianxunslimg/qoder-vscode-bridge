@@ -3,6 +3,7 @@ import type { SDKUserMessage } from '@qoder-ai/qoder-agent-sdk';
 import { compactPromptEntries, type PromptEntry } from './promptPolicy.js';
 import {
   imageDataFromUnknown,
+  renderActiveEditorReference,
   renderDataPart,
   renderUnknownPart,
   type ReferenceRenderOptions,
@@ -30,16 +31,29 @@ type QoderContentBlock =
   | QoderTextContentBlock
   | QoderImageContentBlock;
 
+function latestUserMessageIndex(
+  messages: readonly vscode.LanguageModelChatRequestMessage[],
+): number {
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    if (messages[index].role === vscode.LanguageModelChatMessageRole.User) {
+      return index;
+    }
+  }
+  return -1;
+}
+
 export function hasImageInput(
   messages: readonly vscode.LanguageModelChatRequestMessage[],
 ): boolean {
-  return messages.some((message) =>
-    message.content.some(
-      (part) =>
-        (part instanceof vscode.LanguageModelDataPart &&
-          part.mimeType.startsWith('image/')) ||
-        Boolean(imageDataFromUnknown(part)),
-    ),
+  const latestUserIndex = latestUserMessageIndex(messages);
+  if (latestUserIndex < 0) {
+    return false;
+  }
+  return messages[latestUserIndex].content.some(
+    (part) =>
+      (part instanceof vscode.LanguageModelDataPart &&
+        part.mimeType.startsWith('image/')) ||
+      Boolean(imageDataFromUnknown(part)),
   );
 }
 
@@ -67,6 +81,7 @@ function partToText(
   part: unknown,
   images: QoderImageContentBlock[],
   options: ReferenceRenderOptions,
+  includeImage: boolean,
 ): string {
   if (part instanceof vscode.LanguageModelTextPart) {
     return part.value;
@@ -82,6 +97,9 @@ function partToText(
 
   if (part instanceof vscode.LanguageModelDataPart) {
     if (part.mimeType.startsWith('image/')) {
+      if (!includeImage) {
+        return '[历史图片已省略]';
+      }
       images.push({
         type: 'image',
         source: {
@@ -97,6 +115,9 @@ function partToText(
 
   const image = unknownImageBlock(part);
   if (image) {
+    if (!includeImage) {
+      return '[历史图片已省略]';
+    }
     images.push(image);
     return '';
   }
@@ -113,7 +134,7 @@ function roleToText(role: vscode.LanguageModelChatMessageRole): string {
 export function messageToText(
   message: vscode.LanguageModelChatRequestMessage,
 ): string {
-  const entry = messageToPromptEntry(message, [], {});
+  const entry = messageToPromptEntry(message, [], {}, true);
   return `[${entry.label}]\n${entry.text}`;
 }
 
@@ -121,12 +142,13 @@ function messageToPromptEntry(
   message: vscode.LanguageModelChatRequestMessage,
   images: QoderImageContentBlock[],
   options: ReferenceRenderOptions,
+  includeImages: boolean,
 ): PromptEntry {
   const name = message.name ? ` (${message.name})` : '';
   return {
     label: `${roleToText(message.role)}${name}`,
     text: message.content
-      .map((part) => partToText(part, images, options))
+      .map((part) => partToText(part, images, options, includeImages))
       .join(''),
   };
 }
@@ -136,17 +158,34 @@ export function messagesToPrompt(
   options: ReferenceRenderOptions = {},
 ): QoderPromptInput {
   const images: QoderImageContentBlock[] = [];
+  const latestUserIndex = latestUserMessageIndex(messages);
   const transcript = compactPromptEntries(
-    messages.map((message) => messageToPromptEntry(message, images, options)),
+    messages.map((message, index) =>
+      messageToPromptEntry(
+        message,
+        images,
+        options,
+        index === latestUserIndex,
+      ),
+    ),
   )
     .map((entry) => `[${entry.label}]\n${entry.text}`)
     .join('\n\n');
+  const activeEditorReference = options.activeEditorReference
+    ? renderActiveEditorReference(options.activeEditorReference, options)
+    : undefined;
+  const hasExplicitReference =
+    transcript.includes('[Attached file reference]') ||
+    transcript.includes('[Attached text reference]') ||
+    transcript.includes('[Selected content]');
   const text = [
     'You are Qoder, responding through a VS Code language model provider.',
     'Answer greetings and ordinary conversation directly without inspecting the workspace.',
     'For coding tasks, use the current workspace and its tools only when needed. After making changes, concisely report what changed and how it was validated.',
     'When the prompt contains [Attached file reference], inspect the supplied path or URI before answering if the file is relevant. When [Selected content] is present, treat it as the user-selected range and do not replace it with a workspace-wide search.',
+    'When [Active editor file] or [Active editor selection] is present, treat it as the current user reference. Do not describe older image attachments as the current reference when this section is available.',
     '',
+    activeEditorReference && !hasExplicitReference ? activeEditorReference : '',
     transcript,
   ].join('\n');
 

@@ -21,6 +21,7 @@ import {
   hasImageInput,
   messagesToPrompt,
 } from './messageAdapter.js';
+import type { ActiveEditorReference } from './referenceAdapter.js';
 import {
   descriptorToInformation,
   type QoderModelInformation,
@@ -43,6 +44,82 @@ import { TokenStore } from './tokenStore.js';
 
 const CATALOG_CACHE_TTL_MS = 5 * 60 * 1000;
 const FALLBACK_CACHE_TTL_MS = 5 * 1000;
+const REFERENCE_CUE_PATTERN =
+  /引用|选中|这段|文件|代码|内容|查看|看看|读取|评审|审查|分析|参考|修改|修复|实现|review|file|selection|attached/i;
+const CASUAL_PROMPT_PATTERN =
+  /^(?:你好|您好|嗨|hi|hello|hey|谢谢|感谢|在吗)[\s!！,.。?？]*$/i;
+
+function latestUserText(
+  messages: readonly vscode.LanguageModelChatRequestMessage[],
+): string {
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const message = messages[index];
+    if (message.role !== vscode.LanguageModelChatMessageRole.User) {
+      continue;
+    }
+    return message.content
+      .filter((part): part is vscode.LanguageModelTextPart =>
+        part instanceof vscode.LanguageModelTextPart,
+      )
+      .map((part) => part.value)
+      .join(' ')
+      .trim();
+  }
+  return '';
+}
+
+function activeEditorReferenceFor(
+  messages: readonly vscode.LanguageModelChatRequestMessage[],
+): ActiveEditorReference | undefined {
+  const editor = vscode.window?.activeTextEditor;
+  if (!editor) {
+    return undefined;
+  }
+
+  const prompt = latestUserText(messages);
+  const selection = editor.selection;
+  const hasSelection = !selection.isEmpty;
+  const isReferenceRequest = REFERENCE_CUE_PATTERN.test(prompt);
+  if ((!hasSelection && !isReferenceRequest) ||
+      (hasSelection && CASUAL_PROMPT_PATTERN.test(prompt))) {
+    return undefined;
+  }
+
+  const resource =
+    editor.document.uri.scheme === 'file'
+      ? editor.document.uri.fsPath
+      : editor.document.uri.toString();
+  if (!resource) {
+    return undefined;
+  }
+
+  const range = hasSelection
+    ? `lines ${selection.start.line + 1}-${Math.max(
+        selection.start.line + 1,
+        selection.end.line + 1,
+      )}, columns ${selection.start.character}-${selection.end.character}`
+    : undefined;
+  let text: string | undefined;
+  if (hasSelection) {
+    try {
+      text = editor.document.getText(selection);
+    } catch {
+      text = undefined;
+    }
+  }
+
+  return { resource, range, text };
+}
+
+function promptOptionsFor(
+  messages: readonly vscode.LanguageModelChatRequestMessage[],
+  maxInlineChars: number,
+) {
+  return {
+    maxInlineChars,
+    activeEditorReference: activeEditorReferenceFor(messages),
+  };
+}
 
 interface CatalogLoadResult {
   readonly models: QoderModelInformation[];
@@ -232,9 +309,10 @@ export class QoderModelProvider
       }
 
       q = query({
-        prompt: messagesToPrompt(messages, {
-          maxInlineChars: config.maxInlineReferenceChars,
-        }),
+        prompt: messagesToPrompt(
+          messages,
+          promptOptionsFor(messages, config.maxInlineReferenceChars),
+        ),
         options: {
           auth: accessToken(pat),
           cwd: workspaceFolder.uri.fsPath,
@@ -330,9 +408,10 @@ export class QoderModelProvider
       allowDangerouslySkipPermissions:
         config.permissionMode === 'bypassPermissions',
       maxTurns: config.maxTurns,
-      prompt: messagesToPrompt(messages, {
-        maxInlineChars: config.maxInlineReferenceChars,
-      }),
+      prompt: messagesToPrompt(
+        messages,
+        promptOptionsFor(messages, config.maxInlineReferenceChars),
+      ),
       nativeTools,
     });
 

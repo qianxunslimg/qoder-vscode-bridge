@@ -61,6 +61,61 @@ test('forwards VS Code image data as a Qoder image content block', async () => {
   assert.doesNotMatch(JSON.stringify(content), /non-text input/);
 });
 
+test('does not resend historical images when the current turn is text-only', () => {
+  const prompt = messagesToPrompt([
+    {
+      role: vscode.LanguageModelChatMessageRole.User,
+      name: undefined,
+      content: [
+        new vscode.LanguageModelTextPart('上一轮图片问题'),
+        new vscode.LanguageModelDataPart(new Uint8Array([1, 2, 3]), 'image/png'),
+      ],
+    },
+    {
+      role: vscode.LanguageModelChatMessageRole.Assistant,
+      name: undefined,
+      content: [new vscode.LanguageModelTextPart('上一轮回答')],
+    },
+    {
+      role: vscode.LanguageModelChatMessageRole.User,
+      name: undefined,
+      content: [new vscode.LanguageModelTextPart('你能看到我引用的内容吗？')],
+    },
+  ]);
+
+  assert.equal(typeof prompt, 'string');
+  assert.match(prompt, /\[历史图片已省略\]/);
+});
+
+test('resends images from the current user turn only', async () => {
+  const prompt = messagesToPrompt([
+    {
+      role: vscode.LanguageModelChatMessageRole.User,
+      name: undefined,
+      content: [new vscode.LanguageModelDataPart(new Uint8Array([1]), 'image/png')],
+    },
+    {
+      role: vscode.LanguageModelChatMessageRole.Assistant,
+      name: undefined,
+      content: [new vscode.LanguageModelTextPart('上一轮回答')],
+    },
+    {
+      role: vscode.LanguageModelChatMessageRole.User,
+      name: undefined,
+      content: [
+        new vscode.LanguageModelTextPart('请看这张新图'),
+        new vscode.LanguageModelDataPart(new Uint8Array([2]), 'image/png'),
+      ],
+    },
+  ]);
+
+  assert.notEqual(typeof prompt, 'string');
+  const [message] = await collect(prompt);
+  const images = message.message.content.filter((part) => part.type === 'image');
+  assert.equal(images.length, 1);
+  assert.equal(images[0].source.data, Buffer.from([2]).toString('base64'));
+});
+
 test('forwards opaque image-shaped parts instead of stringifying their bytes', async () => {
   const bytes = new Uint8Array([3, 4, 5]);
   const part = { mimeType: 'image/png', data: bytes };
@@ -234,4 +289,28 @@ test('bounds large selected content while retaining a read hint', () => {
   assert.equal(typeof prompt, 'string');
   assert.match(prompt, /x{16}/);
   assert.match(prompt, /已省略/);
+});
+
+test('includes the active editor selection when VS Code drops reference metadata', () => {
+  const prompt = messagesToPrompt(
+    [
+      {
+        role: vscode.LanguageModelChatMessageRole.User,
+        name: undefined,
+        content: [new vscode.LanguageModelTextPart('你能看到我引用的内容吗？')],
+      },
+    ],
+    {
+      activeEditorReference: {
+        resource: '/workspace/.vscodeignore',
+        range: 'lines 7-12',
+        text: 'tsconfig.json\neslint.config.*\n*.tsbuildinfo\n*.vsix\nREADME.md\n!node_modules/@qoder-ai/qoder-agent-sdk/dist/_worker/**',
+      },
+    },
+  );
+
+  assert.match(prompt, /\[Active editor selection\]/);
+  assert.match(prompt, /\.vscodeignore/);
+  assert.match(prompt, /lines 7-12/);
+  assert.match(prompt, /tsconfig\.json/);
 });
