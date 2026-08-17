@@ -1,6 +1,12 @@
 import * as vscode from 'vscode';
 import type { SDKUserMessage } from '@qoder-ai/qoder-agent-sdk';
 import { compactPromptEntries, type PromptEntry } from './promptPolicy.js';
+import {
+  imageDataFromUnknown,
+  renderDataPart,
+  renderUnknownPart,
+  type ReferenceRenderOptions,
+} from './referenceAdapter.js';
 
 export type QoderPromptInput = string | AsyncIterable<SDKUserMessage>;
 
@@ -30,23 +36,37 @@ export function hasImageInput(
   return messages.some((message) =>
     message.content.some(
       (part) =>
-        part instanceof vscode.LanguageModelDataPart &&
-        part.mimeType.startsWith('image/'),
+        (part instanceof vscode.LanguageModelDataPart &&
+          part.mimeType.startsWith('image/')) ||
+        Boolean(imageDataFromUnknown(part)),
     ),
   );
 }
 
-function jsonForPrompt(value: unknown): string {
-  try {
-    return JSON.stringify(value);
-  } catch {
-    return String(value);
+function unknownImageBlock(
+  part: unknown,
+): QoderImageContentBlock | undefined {
+  const image = imageDataFromUnknown(part);
+  if (!image) {
+    return undefined;
   }
+  return {
+    type: 'image',
+    source: {
+      type: 'base64',
+      media_type: image.mimeType,
+      data:
+        typeof image.data === 'string'
+          ? image.data
+          : Buffer.from(image.data).toString('base64'),
+    },
+  };
 }
 
 function partToText(
   part: unknown,
   images: QoderImageContentBlock[],
+  options: ReferenceRenderOptions,
 ): string {
   if (part instanceof vscode.LanguageModelTextPart) {
     return part.value;
@@ -72,10 +92,16 @@ function partToText(
       });
       return '';
     }
-    return `[non-text input: ${part.mimeType}]`;
+    return renderDataPart(part.mimeType, part.data, options);
   }
 
-  return jsonForPrompt(part);
+  const image = unknownImageBlock(part);
+  if (image) {
+    images.push(image);
+    return '';
+  }
+
+  return renderUnknownPart(part, options);
 }
 
 function roleToText(role: vscode.LanguageModelChatMessageRole): string {
@@ -87,27 +113,31 @@ function roleToText(role: vscode.LanguageModelChatMessageRole): string {
 export function messageToText(
   message: vscode.LanguageModelChatRequestMessage,
 ): string {
-  const entry = messageToPromptEntry(message, []);
+  const entry = messageToPromptEntry(message, [], {});
   return `[${entry.label}]\n${entry.text}`;
 }
 
 function messageToPromptEntry(
   message: vscode.LanguageModelChatRequestMessage,
   images: QoderImageContentBlock[],
+  options: ReferenceRenderOptions,
 ): PromptEntry {
   const name = message.name ? ` (${message.name})` : '';
   return {
     label: `${roleToText(message.role)}${name}`,
-    text: message.content.map((part) => partToText(part, images)).join(''),
+    text: message.content
+      .map((part) => partToText(part, images, options))
+      .join(''),
   };
 }
 
 export function messagesToPrompt(
   messages: readonly vscode.LanguageModelChatRequestMessage[],
+  options: ReferenceRenderOptions = {},
 ): QoderPromptInput {
   const images: QoderImageContentBlock[] = [];
   const transcript = compactPromptEntries(
-    messages.map((message) => messageToPromptEntry(message, images)),
+    messages.map((message) => messageToPromptEntry(message, images, options)),
   )
     .map((entry) => `[${entry.label}]\n${entry.text}`)
     .join('\n\n');
@@ -115,6 +145,7 @@ export function messagesToPrompt(
     'You are Qoder, responding through a VS Code language model provider.',
     'Answer greetings and ordinary conversation directly without inspecting the workspace.',
     'For coding tasks, use the current workspace and its tools only when needed. After making changes, concisely report what changed and how it was validated.',
+    'When the prompt contains [Attached file reference], inspect the supplied path or URI before answering if the file is relevant. When [Selected content] is present, treat it as the user-selected range and do not replace it with a workspace-wide search.',
     '',
     transcript,
   ].join('\n');

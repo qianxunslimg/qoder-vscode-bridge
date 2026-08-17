@@ -8,3 +8,7 @@ const { readConfig } = await import('../out/config.js');
 test('exposes the complete current VS Code host tool set by default', () => {
   assert.equal(readConfig().maxNativeTools, 91);
 });
+
+test('keeps inline references bounded by default', () => {
+  assert.equal(readConfig().maxInlineReferenceChars, 24000);
+});

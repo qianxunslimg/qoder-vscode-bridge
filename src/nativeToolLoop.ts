@@ -69,6 +69,7 @@ const NATIVE_PROMPT_INSTRUCTIONS = [
   'Tools whose names start with qoder_native_ are VS Code host proxies. Use only those proxy names when a tool is necessary; do not call or simulate Qoder built-in tools.',
   'The host, not Qoder, executes the operation and returns its result.',
   'Do not use tools for greetings, casual conversation, or questions that can be answered from the current context.',
+  'When the prompt contains [Attached file reference], use its path or URI and read_file before answering if the file is relevant. When [Selected content] is present, treat it as the user-selected range and use the supplied range as a guide for any follow-up read.',
   'For a task that needs tools, briefly state one concrete plan sentence before the first call. Do not repeat generic progress narration between calls because VS Code renders tool activity.',
   'If the host returns a tool error, correct the arguments and retry the same proxy when appropriate.',
   'After the tool result is available, return the concise final answer to the user.',

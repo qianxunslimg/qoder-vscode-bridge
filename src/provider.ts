@@ -232,7 +232,9 @@ export class QoderModelProvider
       }
 
       q = query({
-        prompt: messagesToPrompt(messages),
+        prompt: messagesToPrompt(messages, {
+          maxInlineChars: config.maxInlineReferenceChars,
+        }),
         options: {
           auth: accessToken(pat),
           cwd: workspaceFolder.uri.fsPath,
@@ -328,7 +330,9 @@ export class QoderModelProvider
       allowDangerouslySkipPermissions:
         config.permissionMode === 'bypassPermissions',
       maxTurns: config.maxTurns,
-      prompt: messagesToPrompt(messages),
+      prompt: messagesToPrompt(messages, {
+        maxInlineChars: config.maxInlineReferenceChars,
+      }),
       nativeTools,
     });
 
