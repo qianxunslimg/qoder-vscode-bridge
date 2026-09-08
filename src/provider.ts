@@ -9,6 +9,7 @@ import {
 } from '@qoder-ai/qoder-agent-sdk';
 import { QoderActivityTracker } from './activity.js';
 import { readConfig } from './config.js';
+import { BridgeDiagnostics, errorMetadata } from './diagnostics.js';
 import {
   buildModelQueryOptions,
   catalogToDescriptors,
@@ -240,21 +241,36 @@ export class QoderModelProvider
 
     const abortController = new AbortController();
     const config = readConfig();
+    const diagnostics = new BridgeDiagnostics(config.debugLogging);
+    diagnostics.event('request_started', { status: 'started', model: model.id });
     const activity = config.showActivity ? new QoderActivityTracker() : undefined;
     const modelOptions = buildModelQueryOptions(model);
 
     const nativeToolResult = latestNativeToolResult(messages);
+    const trackedNativeSession = nativeToolResult
+      ? this.nativeSessions.get(nativeToolResult.callId)
+      : undefined;
+    if (nativeToolResult) {
+      diagnostics.event('tool_result_received', {
+        callId: nativeToolResult.callId,
+        sessionId: trackedNativeSession?.session.sessionId,
+        status: nativeToolResult.isError ? 'error' : 'success',
+        textLength: nativeToolResult.text.length,
+        isError: nativeToolResult.isError,
+      });
+    }
     if (config.nativeToolLoop && nativeToolResult) {
       if (!isNativeToolCallId(nativeToolResult.callId)) {
         throw new Error('Invalid Qoder native tool call id. Retry the request.');
       }
-      const tracked = this.nativeSessions.get(nativeToolResult.callId);
+      const tracked = trackedNativeSession;
       if (tracked) {
         await this.continueNativeSession(
           tracked.session,
           nativeToolResult,
           progress,
           token,
+          diagnostics,
         );
         return;
       }
@@ -274,11 +290,20 @@ export class QoderModelProvider
         if (!terminalResult) {
           continue;
         }
+        diagnostics.event('tool_result_received', {
+          callId: terminalResult.callId,
+          sessionId: tracked.session.sessionId,
+          status: terminalResult.isError ? 'error' : 'success',
+          textLength: terminalResult.text.length,
+          isError: terminalResult.isError,
+          boundary: 'terminal_notification',
+        });
         await this.continueNativeSession(
           tracked.session,
           terminalResult,
           progress,
           token,
+          diagnostics,
         );
         return;
       }
@@ -294,6 +319,7 @@ export class QoderModelProvider
         selectNativeTools(options.tools, config.maxNativeTools),
         progress,
         token,
+        diagnostics,
       );
       return;
     }
@@ -398,6 +424,7 @@ export class QoderModelProvider
     nativeTools: readonly NativeToolDescriptor[],
     progress: vscode.Progress<vscode.LanguageModelResponsePart>,
     token: vscode.CancellationToken,
+    diagnostics: BridgeDiagnostics,
   ): Promise<void> {
     const session = new NativeQoderSession({
       pat,
@@ -408,6 +435,11 @@ export class QoderModelProvider
       allowDangerouslySkipPermissions:
         config.permissionMode === 'bypassPermissions',
       maxTurns: config.maxTurns,
+      nativeToolResultTimeoutMs: config.nativeToolResultTimeoutMs,
+      onClosed: (closedSession) => {
+        this.removeNativeSession(closedSession);
+      },
+      diagnostics,
       prompt: messagesToPrompt(
         messages,
         promptOptionsFor(messages, config.maxInlineReferenceChars),
@@ -420,11 +452,16 @@ export class QoderModelProvider
     });
     try {
       const boundary = await session.start(progress);
-      this.trackNativeBoundary(session, boundary, progress);
+      this.trackNativeBoundary(session, boundary, progress, diagnostics);
       if (boundary.kind === 'done') {
         await session.close();
       }
     } catch (error) {
+      diagnostics.event('native_session_error', {
+        sessionId: session.sessionId,
+        status: 'error',
+        ...errorMetadata(error),
+      });
       await session.cancel();
       throw error;
     } finally {
@@ -437,18 +474,32 @@ export class QoderModelProvider
     result: NativeToolResult,
     progress: vscode.Progress<vscode.LanguageModelResponsePart>,
     token: vscode.CancellationToken,
+    diagnostics: BridgeDiagnostics,
   ): Promise<void> {
+    diagnostics.event('provider_continue', {
+      sessionId: session.sessionId,
+      callId: result.callId,
+      status: 'started',
+      textLength: result.text.length,
+      isError: result.isError,
+    });
     const cancellation = token.onCancellationRequested(() => {
       void session.cancel();
     });
     try {
       const boundary = await session.continueWithToolResult(result, progress);
       this.removeNativeSession(session);
-      this.trackNativeBoundary(session, boundary, progress);
+      this.trackNativeBoundary(session, boundary, progress, diagnostics);
       if (boundary.kind === 'done') {
         await session.close();
       }
     } catch (error) {
+      diagnostics.event('native_session_error', {
+        sessionId: session.sessionId,
+        callId: result.callId,
+        status: 'error',
+        ...errorMetadata(error),
+      });
       this.removeNativeSession(session);
       await session.cancel();
       throw error;
@@ -461,6 +512,7 @@ export class QoderModelProvider
     session: NativeQoderSession,
     boundary: NativeSessionBoundary,
     progress: vscode.Progress<vscode.LanguageModelResponsePart>,
+    diagnostics: BridgeDiagnostics,
   ): void {
     if (boundary.kind === 'tool_call') {
       progress.report(
@@ -470,6 +522,12 @@ export class QoderModelProvider
           boundary.invocation.input,
         ),
       );
+      diagnostics.event('tool_call_emitted', {
+        sessionId: session.sessionId,
+        callId: boundary.invocation.callId,
+        tool: boundary.invocation.name,
+        status: 'emitted',
+      });
       this.nativeSessions.set(boundary.invocation.callId, {
         session,
         invocation: boundary.invocation,

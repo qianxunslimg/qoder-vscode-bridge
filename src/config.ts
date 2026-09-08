@@ -8,9 +8,15 @@ export interface BridgeConfig {
   readonly includePartialMessages: boolean;
   readonly showActivity: boolean;
   readonly nativeToolLoop: boolean;
+  readonly nativeToolResultTimeoutMs: number;
+  readonly debugLogging: boolean;
   readonly maxNativeTools: number;
   readonly maxInlineReferenceChars: number;
 }
+
+export const DEFAULT_NATIVE_TOOL_RESULT_TIMEOUT_MS = 5 * 60 * 1000;
+export const MIN_NATIVE_TOOL_RESULT_TIMEOUT_MS = 5 * 1000;
+export const MAX_NATIVE_TOOL_RESULT_TIMEOUT_MS = 30 * 60 * 1000;
 
 const PERMISSION_MODES: readonly PermissionMode[] = [
   'auto',
@@ -39,6 +45,21 @@ export function readConfig(): BridgeConfig {
     8,
     Math.min(128, configuration.get<number>('maxNativeTools', 91)),
   );
+  const configuredNativeToolResultTimeoutMs = configuration.get<number>(
+    'nativeToolResultTimeoutMs',
+    DEFAULT_NATIVE_TOOL_RESULT_TIMEOUT_MS,
+  );
+  const nativeToolResultTimeoutMs = Number.isFinite(
+    configuredNativeToolResultTimeoutMs,
+  )
+    ? Math.max(
+        MIN_NATIVE_TOOL_RESULT_TIMEOUT_MS,
+        Math.min(
+          MAX_NATIVE_TOOL_RESULT_TIMEOUT_MS,
+          configuredNativeToolResultTimeoutMs,
+        ),
+      )
+    : DEFAULT_NATIVE_TOOL_RESULT_TIMEOUT_MS;
   const maxInlineReferenceChars = Math.max(
     0,
     Math.min(
@@ -59,6 +80,8 @@ export function readConfig(): BridgeConfig {
     ),
     showActivity: configuration.get<boolean>('showActivity', true),
     nativeToolLoop: configuration.get<boolean>('nativeToolLoop', true),
+    nativeToolResultTimeoutMs,
+    debugLogging: configuration.get<boolean>('debugLogging', true),
     maxNativeTools,
     maxInlineReferenceChars,
   };

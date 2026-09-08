@@ -8,6 +8,7 @@ import {
   QoderReadFileTool,
   readWorkspaceFile,
 } from '../out/nativeReadFileTool.js';
+import { DEFAULT_NATIVE_TOOL_RESULT_TIMEOUT_MS } from '../out/config.js';
 
 const pat = process.env.QODER_PERSONAL_ACCESS_TOKEN?.trim();
 if (!pat) {
@@ -48,6 +49,7 @@ async function createSession(prompt) {
     permissionMode: 'auto',
     allowDangerouslySkipPermissions: false,
     maxTurns: 6,
+    nativeToolResultTimeoutMs: DEFAULT_NATIVE_TOOL_RESULT_TIMEOUT_MS,
     prompt,
     nativeTools: [
       {

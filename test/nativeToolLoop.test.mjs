@@ -272,6 +272,180 @@ test('does not apply maxTurns as a second per-tool call limit', async () => {
   });
 });
 
+test('cancels a native session when the host tool queue never dispatches', async () => {
+  const proxyName = 'qoder_native_0_read_file';
+  const session = Object.create(NativeQoderSession.prototype);
+  let cancelledReason;
+  session.nativeToolResultTimeoutMs = 20;
+  session.closed = false;
+  session.messages = {
+    async next() {
+      return {
+        type: 'assistant',
+        message: {
+          content: [{
+            type: 'tool_use',
+            id: 'toolu_queue_timeout',
+            name: proxyName,
+            input: { filePath: 'README.md' },
+          }],
+        },
+      };
+    },
+  };
+  session.proxyTools = new Map([
+    [proxyName, { name: 'read_file', proxyName }],
+  ]);
+  session.proxyRequests = new Map([
+    [proxyName, { async next() { return new Promise(() => {}); } }],
+  ]);
+  session.seenToolCalls = new Set();
+  session.pendingCalls = new Map();
+  session.cancel = async (reason) => {
+    cancelledReason = reason;
+    session.closed = true;
+  };
+
+  await assert.rejects(
+    session.consumeUntilBoundary({ report() {} }),
+    /did not return a result within 1 seconds/,
+  );
+  assert.match(cancelledReason, /cancel the request and retry/);
+});
+
+test('cancels a native session when VS Code never returns the host result', async () => {
+  const proxyName = 'qoder_native_0_read_file';
+  let rejectResult;
+  const resultPromise = new Promise((_, reject) => {
+    rejectResult = reject;
+  });
+  // Keep the intentionally rejected proxy promise observed while exercising
+  // the watchdog, matching the SDK's MCP consumer in a real session.
+  resultPromise.catch(() => undefined);
+  const proxyRequest = {
+    proxyName,
+    input: { filePath: 'README.md' },
+    result: {
+      promise: resultPromise,
+      resolve() {},
+      reject: rejectResult,
+    },
+  };
+  const session = Object.create(NativeQoderSession.prototype);
+  let cancelledReason;
+  session.nativeToolResultTimeoutMs = 20;
+  session.closed = false;
+  session.messages = {
+    async next() {
+      return {
+        type: 'assistant',
+        message: {
+          content: [{
+            type: 'tool_use',
+            id: 'toolu_result_timeout',
+            name: proxyName,
+            input: proxyRequest.input,
+          }],
+        },
+      };
+    },
+  };
+  session.proxyTools = new Map([
+    [proxyName, { name: 'read_file', proxyName }],
+  ]);
+  session.proxyRequests = new Map([
+    [proxyName, { async next() { return proxyRequest; } }],
+  ]);
+  session.seenToolCalls = new Set();
+  session.pendingCalls = new Map();
+  session.cancel = async (reason) => {
+    cancelledReason = reason;
+    session.closed = true;
+  };
+
+  const boundary = await session.consumeUntilBoundary({ report() {} });
+  assert.equal(boundary.kind, 'tool_call');
+  await new Promise((resolve) => setTimeout(resolve, 40));
+
+  assert.match(cancelledReason, /did not return a result within 1 seconds/);
+  assert.equal(session.pendingCalls.size, 0);
+});
+
+test('clears the native result watchdog after a successful host result', async () => {
+  const proxyName = 'qoder_native_0_read_file';
+  const proxyResult = (() => {
+    let resolvePromise;
+    const promise = new Promise((resolve) => {
+      resolvePromise = resolve;
+    });
+    return {
+      promise,
+      resolve: resolvePromise,
+      reject() {},
+    };
+  })();
+  const proxyRequest = {
+    proxyName,
+    input: { filePath: 'README.md' },
+    result: proxyResult,
+  };
+  const messages = [
+    {
+      type: 'assistant',
+      message: {
+        content: [{
+          type: 'tool_use',
+          id: 'toolu_success',
+          name: proxyName,
+          input: proxyRequest.input,
+        }],
+      },
+    },
+    { type: 'result', subtype: 'success', result: 'done', errors: [] },
+  ];
+  const session = Object.create(NativeQoderSession.prototype);
+  let cancelled = false;
+  let closed = 0;
+  session.nativeToolResultTimeoutMs = 20;
+  session.closed = false;
+  session.messages = { async next() { return messages.shift(); } };
+  session.proxyTools = new Map([
+    [proxyName, { name: 'read_file', proxyName }],
+  ]);
+  session.proxyRequests = new Map([
+    [proxyName, { async next() { return proxyRequest; } }],
+  ]);
+  session.seenToolCalls = new Set();
+  session.pendingCalls = new Map();
+  session.cancel = async () => {
+    cancelled = true;
+  };
+  session.close = async () => {
+    closed += 1;
+  };
+
+  const boundary = await session.consumeUntilBoundary({ report() {} });
+  assert.equal(boundary.kind, 'tool_call');
+  const done = await session.continueWithToolResult(
+    {
+      callId: boundary.invocation.callId,
+      text: 'file contents',
+      isError: false,
+    },
+    { report() {} },
+  );
+
+  assert.deepEqual(done, { kind: 'done' });
+  assert.equal(closed, 1);
+  assert.equal(session.pendingCalls.size, 0);
+  await new Promise((resolve) => setTimeout(resolve, 40));
+  assert.equal(cancelled, false);
+  assert.deepEqual(await proxyResult.promise, {
+    content: [{ type: 'text', text: 'file contents' }],
+    isError: false,
+  });
+});
+
 test('provider restarts from transcript when a native result has no live session', async () => {
   const callId = 'qoder-native-stale-call';
   const messages = [

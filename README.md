@@ -85,6 +85,8 @@ npm run package
 | `qoderBridge.includePartialMessages` | `true` | 尽可能把流式文本增量显示到 Chat。 |
 | `qoderBridge.showActivity` | `true` | 是否显示分析、工具、任务、结果、重试和完成状态摘要。 |
 | `qoderBridge.nativeToolLoop` | `true` | 是否把 Chat 请求提供的 Bash、Read、Edit 等工具交给 VS Code 原生工具循环。 |
+| `qoderBridge.nativeToolResultTimeoutMs` | `300000` | 等待 VS Code 返回原生工具结果的最长时间（毫秒）；超时会取消当前 Qoder 会话并提示重试，可为长时间构建或测试调大。范围 `5000`–`1800000`。 |
+| `qoderBridge.debugLogging` | `true` | 是否记录原生工具链路诊断到 VS Code 扩展宿主日志；只记录调用元数据和文本长度，不记录 prompt、文件内容、路径或令牌。 |
 | `qoderBridge.maxNativeTools` | `91` | 单次请求最多暴露给 Qoder 的宿主工具数；默认覆盖 VS Code 当前完整工具集合。主动调低时核心编码工具优先。 |
 | `qoderBridge.maxInlineReferenceChars` | `24000` | 文件选中内容或粘贴文本最多直接放入 prompt 的字符数；超过后保留截断提示和文件读取路径。 |
 
@@ -94,8 +96,11 @@ npm run package
 npm install
 npm run compile
 npm test
+npm run validate
 npm run package
 ```
+
+其中 `npm run validate` 会执行编译和测试。
 
 在 VS Code 中按 `F5` 可以启动 Extension Development Host。测试命令只从当前进程环境变量读取令牌，不会把令牌写入仓库：
 

@@ -2,7 +2,7 @@
   "name": "qoder-vscode-bridge",
   "displayName": "Qoder Model Provider for Copilot Chat",
   "description": "Use Qoder Agent SDK models from VS Code's native Chat model picker.",
-  "version": "0.1.1",
+  "version": "0.1.3",
   "publisher": "qianxunslimg",
   "license": "MIT",
   "repository": {
@@ -141,6 +141,18 @@
           "default": true,
           "description": "Delegate tools supplied by Copilot Chat to VS Code's native tool loop. Requests without host tools keep Qoder's internal text-only path."
         },
+        "qoderBridge.nativeToolResultTimeoutMs": {
+          "type": "number",
+          "minimum": 5000,
+          "maximum": 1800000,
+          "default": 300000,
+          "description": "Maximum time to wait for VS Code to return a native tool result before cancelling the Qoder session. Increase this for long-running builds or tests."
+        },
+        "qoderBridge.debugLogging": {
+          "type": "boolean",
+          "default": true,
+          "description": "Write native bridge lifecycle diagnostics to the VS Code extension-host log. Only metadata and text lengths are recorded; prompts, file contents, paths, and tokens are omitted."
+        },
         "qoderBridge.maxNativeTools": {
           "type": "number",
           "minimum": 8,
@@ -162,6 +174,7 @@
     "compile": "tsc -p ./",
     "check": "npm run compile",
     "test": "npm run compile && node --test test/*.test.mjs",
+    "validate": "npm test",
     "smoke": "node ./scripts/smoke.mjs",
     "catalog:smoke": "node ./scripts/catalog-smoke.mjs",
     "model:smoke": "node ./scripts/model-smoke.mjs",
