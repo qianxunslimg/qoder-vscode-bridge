@@ -1,9 +1,22 @@
 import * as vscode from 'vscode';
-import type { PermissionMode } from '@qoder-ai/qoder-agent-sdk';
 import { DEFAULT_MAX_INLINE_REFERENCE_CHARS } from './referenceAdapter.js';
 
+export type ReasoningEffort =
+  | 'auto'
+  | 'low'
+  | 'medium'
+  | 'high'
+  | 'xhigh'
+  | 'max'
+  | 'off';
+
+export interface ModelOverride {
+  readonly contextWindow?: number;
+  readonly reasoningEffort?: ReasoningEffort;
+}
+
 export interface BridgeConfig {
-  readonly permissionMode: PermissionMode;
+  readonly modelOverrides: Readonly<Record<string, ModelOverride>>;
   readonly maxTurns: number;
   readonly includePartialMessages: boolean;
   readonly showActivity: boolean;
@@ -18,25 +31,55 @@ export const DEFAULT_NATIVE_TOOL_RESULT_TIMEOUT_MS = 5 * 60 * 1000;
 export const MIN_NATIVE_TOOL_RESULT_TIMEOUT_MS = 5 * 1000;
 export const MAX_NATIVE_TOOL_RESULT_TIMEOUT_MS = 30 * 60 * 1000;
 
-const PERMISSION_MODES: readonly PermissionMode[] = [
+const REASONING_EFFORTS: readonly ReasoningEffort[] = [
   'auto',
-  'acceptEdits',
-  'default',
-  'plan',
-  'bypassPermissions',
-  'yolo',
-  'dontAsk',
+  'low',
+  'medium',
+  'high',
+  'xhigh',
+  'max',
+  'off',
 ];
+
+function readModelOverrides(value: unknown): Readonly<Record<string, ModelOverride>> {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return {};
+  }
+  const overrides: Record<string, ModelOverride> = {};
+  for (const [modelId, raw] of Object.entries(value)) {
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+      continue;
+    }
+    const candidate = raw as Record<string, unknown>;
+    const contextWindow = candidate.contextWindow;
+    const reasoningEffort = candidate.reasoningEffort;
+    const normalizedContext = typeof contextWindow === 'number' &&
+      Number.isFinite(contextWindow) && contextWindow > 0
+      ? Math.floor(contextWindow)
+      : undefined;
+    const normalizedEffort = typeof reasoningEffort === 'string' &&
+      REASONING_EFFORTS.includes(reasoningEffort as ReasoningEffort)
+      ? (reasoningEffort as ReasoningEffort)
+      : undefined;
+    if (normalizedContext !== undefined || normalizedEffort !== undefined) {
+      overrides[modelId] = {
+        ...(normalizedContext !== undefined
+          ? { contextWindow: normalizedContext }
+          : {}),
+        ...(normalizedEffort !== undefined
+          ? { reasoningEffort: normalizedEffort }
+          : {}),
+      };
+    }
+  }
+  return overrides;
+}
 
 export function readConfig(): BridgeConfig {
   const configuration = vscode.workspace.getConfiguration('qoderBridge');
-  const configuredMode = configuration.get<string>(
-    'permissionMode',
-    'bypassPermissions',
+  const modelOverrides = readModelOverrides(
+    configuration.get<unknown>('modelOverrides', {}),
   );
-  const permissionMode = PERMISSION_MODES.includes(configuredMode as PermissionMode)
-    ? (configuredMode as PermissionMode)
-    : 'bypassPermissions';
   const maxTurns = Math.max(
     1,
     Math.min(100, configuration.get<number>('maxTurns', 30)),
@@ -72,7 +115,7 @@ export function readConfig(): BridgeConfig {
   );
 
   return {
-    permissionMode,
+    modelOverrides,
     maxTurns,
     includePartialMessages: configuration.get<boolean>(
       'includePartialMessages',

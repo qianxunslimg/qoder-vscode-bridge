@@ -9,7 +9,18 @@ import type { QoderModelDescriptor } from './modelCatalog.js';
 export interface QoderModelInformation
   extends vscode.LanguageModelChatInformation {
   readonly qoderId: string;
+  readonly description?: string;
   readonly maxContextWindow?: number;
+  readonly defaultContextWindow?: number;
+  readonly availableContextWindows?: readonly number[];
+  readonly isDefault?: boolean;
+  readonly isFree?: boolean;
+  readonly isReasoning?: boolean;
+  readonly efforts?: readonly string[];
+  readonly defaultEffort?: string;
+  readonly supportsDisabled?: boolean;
+  readonly priceFactor?: number;
+  readonly tags?: readonly string[];
   readonly isBYOK: true;
   readonly isUserSelectable: true;
 }
@@ -21,6 +32,7 @@ export function descriptorToInformation(
     id: descriptor.id,
     qoderId: descriptor.id,
     name: descriptor.name,
+    description: descriptor.description,
     family: 'qoder-agent',
     version: descriptor.id,
     maxInputTokens: descriptor.maxInputTokens,
@@ -36,5 +48,15 @@ export function descriptorToInformation(
     detail: descriptor.detail,
     tooltip: descriptor.tooltip,
     maxContextWindow: descriptor.maxContextWindow,
+    defaultContextWindow: descriptor.defaultContextWindow,
+    availableContextWindows: descriptor.availableContextWindows,
+    isDefault: descriptor.isDefault,
+    isFree: descriptor.isFree,
+    isReasoning: descriptor.isReasoning,
+    efforts: descriptor.efforts,
+    defaultEffort: descriptor.defaultEffort,
+    supportsDisabled: descriptor.supportsDisabled,
+    priceFactor: descriptor.priceFactor,
+    tags: descriptor.tags,
   };
 }

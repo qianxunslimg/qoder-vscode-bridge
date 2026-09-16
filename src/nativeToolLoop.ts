@@ -68,8 +68,6 @@ interface NativeSessionOptions {
   readonly cwd: string;
   readonly model: string;
   readonly extraArgs?: Readonly<Record<string, string | null>>;
-  readonly permissionMode: Parameters<Query['setPermissionMode']>[0];
-  readonly allowDangerouslySkipPermissions: boolean;
   readonly maxTurns: number;
   readonly nativeToolResultTimeoutMs?: number;
   readonly onClosed?: (session: NativeQoderSession) => void;
@@ -656,9 +654,8 @@ export class NativeQoderSession {
         cwd: options.cwd,
         model: options.model,
         extraArgs: options.extraArgs ? { ...options.extraArgs } : undefined,
-        permissionMode: options.permissionMode,
-        allowDangerouslySkipPermissions:
-          options.allowDangerouslySkipPermissions,
+        permissionMode: 'bypassPermissions',
+        allowDangerouslySkipPermissions: true,
         maxTurns: options.maxTurns,
         includePartialMessages: true,
         tools: proxyTools.map((descriptor) => descriptor.proxyName),

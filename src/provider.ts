@@ -127,6 +127,12 @@ interface CatalogLoadResult {
   readonly loadedFromQoder: boolean;
 }
 
+export interface QoderCatalogSnapshot {
+  readonly models: readonly QoderModelInformation[];
+  readonly loadedFromQoder: boolean;
+  readonly refreshedAt: number;
+}
+
 interface TrackedNativeSession {
   readonly session: NativeQoderSession;
   readonly invocation: NativeToolInvocation;
@@ -208,6 +214,18 @@ export class QoderModelProvider
     return loaded.loadedFromQoder;
   }
 
+  /** Return the same live/fallback catalog exposed to VS Code's model picker. */
+  public async getCatalogSnapshot(
+    force = false,
+  ): Promise<QoderCatalogSnapshot> {
+    const result = await this.getModels(force);
+    return {
+      models: result.models,
+      loadedFromQoder: result.loadedFromQoder,
+      refreshedAt: Date.now(),
+    };
+  }
+
   public async fetchUsage(pat: string, cwd: string): Promise<UsageInfo | null> {
     return this.metadataSession.getUsageInfo(pat, cwd);
   }
@@ -244,7 +262,14 @@ export class QoderModelProvider
     const diagnostics = new BridgeDiagnostics(config.debugLogging);
     diagnostics.event('request_started', { status: 'started', model: model.id });
     const activity = config.showActivity ? new QoderActivityTracker() : undefined;
-    const modelOptions = buildModelQueryOptions(model);
+    const modelOverride = config.modelOverrides[model.id];
+    const modelOptions = buildModelQueryOptions(model, {
+      contextWindow: modelOverride?.contextWindow,
+      // Each model card owns its context/effort override. With no override,
+      // use the largest advertised context and let Qoder choose its effort.
+      contextWindowPolicy: 'maximum',
+      reasoningEffort: modelOverride?.reasoningEffort ?? 'auto',
+    });
 
     const nativeToolResult = latestNativeToolResult(messages);
     const trackedNativeSession = nativeToolResult
@@ -346,9 +371,8 @@ export class QoderModelProvider
           extraArgs: modelOptions.extraArgs
             ? { ...modelOptions.extraArgs }
             : undefined,
-          permissionMode: config.permissionMode,
-          allowDangerouslySkipPermissions:
-            config.permissionMode === 'bypassPermissions',
+          permissionMode: 'bypassPermissions',
+          allowDangerouslySkipPermissions: true,
           maxTurns: config.maxTurns,
           includePartialMessages: config.includePartialMessages,
           includeHookEvents: config.showActivity,
@@ -431,9 +455,6 @@ export class QoderModelProvider
       cwd,
       model: modelOptions.model,
       extraArgs: modelOptions.extraArgs,
-      permissionMode: config.permissionMode,
-      allowDangerouslySkipPermissions:
-        config.permissionMode === 'bypassPermissions',
       maxTurns: config.maxTurns,
       nativeToolResultTimeoutMs: config.nativeToolResultTimeoutMs,
       onClosed: (closedSession) => {

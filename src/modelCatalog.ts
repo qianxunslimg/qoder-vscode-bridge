@@ -6,12 +6,21 @@ const FALLBACK_MAX_OUTPUT_TOKENS = 8_192;
 export interface QoderModelDescriptor {
   readonly id: string;
   readonly name: string;
+  readonly description?: string;
   readonly maxInputTokens: number;
   readonly maxOutputTokens: number;
   readonly maxContextWindow?: number;
   readonly defaultContextWindow?: number;
   readonly availableContextWindows?: readonly number[];
+  readonly isDefault?: boolean;
+  readonly isFree?: boolean;
+  readonly isReasoning?: boolean;
   readonly imageInput: boolean;
+  readonly efforts?: readonly string[];
+  readonly defaultEffort?: string;
+  readonly supportsDisabled?: boolean;
+  readonly priceFactor?: number;
+  readonly tags?: readonly string[];
   readonly detail?: string;
   readonly tooltip?: string;
 }
@@ -21,9 +30,23 @@ export interface QoderModelQueryOptions {
   readonly extraArgs?: Readonly<Record<string, string | null>>;
 }
 
+export type ContextWindowPolicy = 'maximum' | 'default';
+
+export interface QoderModelQueryPreferences {
+  readonly contextWindowPolicy?: ContextWindowPolicy;
+  readonly contextWindow?: number;
+  readonly reasoningEffort?: string;
+}
+
 function positiveNumber(value: number | undefined): number | undefined {
   return value !== undefined && Number.isFinite(value) && value > 0
     ? Math.floor(value)
+    : undefined;
+}
+
+function positiveFactor(value: number | undefined): number | undefined {
+  return value !== undefined && Number.isFinite(value) && value > 0
+    ? value
     : undefined;
 }
 
@@ -47,10 +70,10 @@ function maximumContextWindow(model: Pick<ModelInfo, 'availableContextWindows'>)
 
 function detailForModel(model: ModelInfo, maxContextWindow?: number): string {
   const parts = ['Qoder'];
-  if (model.priceFactor !== undefined && Number.isFinite(model.priceFactor)) {
-    parts.push(`${model.priceFactor}x`);
-  }
-  if (model.isFree || model.priceFactor === 0) {
+  const factor = positiveFactor(model.priceFactor);
+  if (factor !== undefined) {
+    parts.push(`${factor}x`);
+  } else if (model.isFree || model.priceFactor === 0) {
     parts.push('free');
   }
   if (maxContextWindow !== undefined) {
@@ -86,12 +109,21 @@ export function modelInfoToDescriptor(
   return {
     id,
     name,
+    description: model.description?.trim() || undefined,
     maxInputTokens,
     maxOutputTokens,
     maxContextWindow,
     defaultContextWindow,
     availableContextWindows: contextWindows,
+    isDefault: model.isDefault,
+    isFree: model.isFree,
+    isReasoning: model.isReasoning,
     imageInput: model.isVl === true,
+    efforts: model.efforts?.filter((effort) => effort.trim().length > 0),
+    defaultEffort: model.defaultEffort?.trim() || undefined,
+    supportsDisabled: model.supportsDisabled,
+    priceFactor: positiveFactor(model.priceFactor),
+    tags: model.tags?.filter((tag) => tag.trim().length > 0),
     detail: detailForModel(model, maxContextWindow),
     tooltip: [
       `${name} (${id})`,
@@ -116,18 +148,43 @@ export function catalogToDescriptors(
 }
 
 export function buildModelQueryOptions(
-  model: Pick<QoderModelDescriptor, 'id' | 'maxContextWindow'>,
+  model: Pick<
+    QoderModelDescriptor,
+    | 'id'
+    | 'maxContextWindow'
+    | 'defaultContextWindow'
+    | 'availableContextWindows'
+    | 'efforts'
+    | 'supportsDisabled'
+  >,
+  preferences: QoderModelQueryPreferences = {},
 ): QoderModelQueryOptions {
-  if (model.maxContextWindow === undefined) {
-    return { model: model.id };
+  const requestedContextWindow = preferences.contextWindow;
+  const contextWindow = requestedContextWindow !== undefined &&
+    Number.isFinite(requestedContextWindow) &&
+    requestedContextWindow > 0 &&
+    model.availableContextWindows?.includes(requestedContextWindow)
+    ? requestedContextWindow
+    : preferences.contextWindowPolicy === 'default'
+      ? model.defaultContextWindow ?? model.maxContextWindow
+      : model.maxContextWindow;
+  const extraArgs: Record<string, string> = {};
+  if (contextWindow !== undefined) {
+    extraArgs['context-window'] = String(contextWindow);
   }
 
-  return {
-    model: model.id,
-    extraArgs: {
-      'context-window': String(model.maxContextWindow),
-    },
-  };
+  const effort = preferences.reasoningEffort?.trim();
+  const supportedEffort = effort && effort !== 'auto' && (
+    model.efforts?.includes(effort) ||
+    (effort === 'off' && model.supportsDisabled === true)
+  );
+  if (supportedEffort) {
+    extraArgs['reasoning-effort'] = effort;
+  }
+
+  return Object.keys(extraArgs).length === 0
+    ? { model: model.id }
+    : { model: model.id, extraArgs };
 }
 
 export function fallbackModelDescriptors(): QoderModelDescriptor[] {

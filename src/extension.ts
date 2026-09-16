@@ -2,6 +2,7 @@ import * as vscode from 'vscode';
 import { QoderModelProvider } from './provider.js';
 import { registerQoderReadFileTool } from './nativeReadFileTool.js';
 import { TokenStore } from './tokenStore.js';
+import { QoderControlCenter } from './controlCenter.js';
 
 function workspaceCwd(): string | undefined {
   return vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
@@ -10,6 +11,15 @@ function workspaceCwd(): string | undefined {
 export function activate(context: vscode.ExtensionContext): void {
   const tokenStore = new TokenStore(context.secrets);
   const provider = new QoderModelProvider(tokenStore);
+  const controlCenter = new QoderControlCenter(context, provider, tokenStore);
+  const statusBar = vscode.window.createStatusBarItem(
+    vscode.StatusBarAlignment.Right,
+    100,
+  );
+  statusBar.text = '$(settings-gear) Qoder';
+  statusBar.tooltip = 'Open Qoder Control Center';
+  statusBar.command = 'qoderBridge.openControlCenter';
+  statusBar.show();
 
   registerQoderReadFileTool(context);
 
@@ -17,6 +27,14 @@ export function activate(context: vscode.ExtensionContext): void {
     vscode.lm.registerLanguageModelChatProvider('qoder', provider),
   );
   context.subscriptions.push(provider);
+  context.subscriptions.push(controlCenter);
+  context.subscriptions.push(statusBar);
+
+  context.subscriptions.push(
+    vscode.commands.registerCommand('qoderBridge.openControlCenter', () => {
+      controlCenter.open();
+    }),
+  );
 
   context.subscriptions.push(
     vscode.commands.registerCommand('qoderBridge.setPat', async () => {

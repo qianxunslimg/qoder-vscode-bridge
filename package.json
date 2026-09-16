@@ -2,7 +2,7 @@
   "name": "qoder-vscode-bridge",
   "displayName": "Qoder Model Provider for Copilot Chat",
   "description": "Use Qoder Agent SDK models from VS Code's native Chat model picker.",
-  "version": "0.1.3",
+  "version": "1.0.0",
   "publisher": "qianxunslimg",
   "license": "MIT",
   "repository": {
@@ -31,7 +31,8 @@
     "onCommand:qoderBridge.setPat",
     "onCommand:qoderBridge.clearPat",
     "onCommand:qoderBridge.refreshModels",
-    "onCommand:qoderBridge.showUsage"
+    "onCommand:qoderBridge.showUsage",
+    "onCommand:qoderBridge.openControlCenter"
   ],
   "contributes": {
     "languageModelChatProviders": [
@@ -100,24 +101,20 @@
         "command": "qoderBridge.showUsage",
         "title": "Qoder: Show Usage",
         "category": "Qoder"
+      },
+      {
+        "command": "qoderBridge.openControlCenter",
+        "title": "Qoder: Open Control Center",
+        "category": "Qoder"
       }
     ],
     "configuration": {
       "title": "Qoder Bridge",
       "properties": {
-        "qoderBridge.permissionMode": {
-          "type": "string",
-          "enum": [
-            "auto",
-            "acceptEdits",
-            "default",
-            "plan",
-            "bypassPermissions",
-            "yolo",
-            "dontAsk"
-          ],
-          "default": "bypassPermissions",
-          "description": "Qoder tool permission mode used by the model provider. The default skips Qoder-side approval; VS Code host-tool confirmation remains controlled by the host."
+        "qoderBridge.modelOverrides": {
+          "type": "object",
+          "default": {},
+          "description": "Per-model context and reasoning overrides maintained by the Qoder Control Center."
         },
         "qoderBridge.maxTurns": {
           "type": "number",
@@ -181,7 +178,7 @@
     "native:smoke": "node --require ./scripts/vscode-mock-require.cjs ./scripts/native-tool-loop-smoke.mjs",
     "provider:native:smoke": "node --require ./scripts/vscode-mock-require.cjs ./scripts/provider-native-loop-smoke.mjs",
     "vscode:prepublish": "npm run compile",
-    "package": "vsce package"
+    "package": "vsce package --no-yarn --dependencies"
   },
   "dependencies": {
     "@qoder-ai/qoder-agent-sdk": "^1.0.19",
