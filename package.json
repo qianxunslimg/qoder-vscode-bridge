@@ -1,8 +1,8 @@
 {
   "name": "qoder-vscode-bridge",
-  "displayName": "Qoder Model Provider for Copilot Chat",
-  "description": "Use Qoder Agent SDK models from VS Code's native Chat model picker.",
-  "version": "1.0.1",
+  "displayName": "Qoder Team Bridge for VS Code Chat",
+  "description": "An independent VS Code companion for Qoder Team and business accounts, bringing Qoder models to VS Code Chat where the official Qoder plugin is unavailable.",
+  "version": "1.0.2",
   "publisher": "qianxunslimg",
   "license": "MIT",
   "repository": {
