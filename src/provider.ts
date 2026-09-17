@@ -45,6 +45,7 @@ import { TokenStore } from './tokenStore.js';
 
 const CATALOG_CACHE_TTL_MS = 5 * 60 * 1000;
 const FALLBACK_CACHE_TTL_MS = 5 * 1000;
+const USAGE_CACHE_TTL_MS = 30 * 1000;
 const REFERENCE_CUE_PATTERN =
   /引用|选中|这段|文件|代码|内容|查看|看看|读取|评审|审查|分析|参考|修改|修复|实现|review|file|selection|attached/i;
 const CASUAL_PROMPT_PATTERN =
@@ -138,6 +139,12 @@ interface TrackedNativeSession {
   readonly invocation: NativeToolInvocation;
 }
 
+interface UsageCacheEntry {
+  readonly key: string;
+  readonly usage: UsageInfo | null;
+  readonly fetchedAt: number;
+}
+
 function deduplicateModels(
   descriptors: readonly QoderModelDescriptor[],
 ): QoderModelInformation[] {
@@ -187,6 +194,10 @@ export class QoderModelProvider
   private cacheExpiresAt = 0;
   private inFlight: Promise<CatalogLoadResult> | undefined;
   private readonly metadataSession = new QoderMetadataSession();
+  private usageCache: UsageCacheEntry | undefined;
+  private usageInFlight:
+    | { readonly key: string; readonly promise: Promise<UsageInfo | null> }
+    | undefined;
   private readonly nativeSessions = new Map<string, TrackedNativeSession>();
 
   public readonly onDidChangeLanguageModelChatInformation =
@@ -217,8 +228,9 @@ export class QoderModelProvider
   /** Return the same live/fallback catalog exposed to VS Code's model picker. */
   public async getCatalogSnapshot(
     force = false,
+    allowNetwork = true,
   ): Promise<QoderCatalogSnapshot> {
-    const result = await this.getModels(force);
+    const result = await this.getModels(force, allowNetwork);
     return {
       models: result.models,
       loadedFromQoder: result.loadedFromQoder,
@@ -226,8 +238,37 @@ export class QoderModelProvider
     };
   }
 
-  public async fetchUsage(pat: string, cwd: string): Promise<UsageInfo | null> {
-    return this.metadataSession.getUsageInfo(pat, cwd);
+  public async fetchUsage(
+    pat: string,
+    cwd: string,
+    options: { readonly force?: boolean } = {},
+  ): Promise<UsageInfo | null> {
+    const key = `${cwd}\u0000${pat}`;
+    const force = options.force === true;
+    const cached = this.usageCache;
+    if (
+      !force &&
+      cached?.key === key &&
+      Date.now() - cached.fetchedAt < USAGE_CACHE_TTL_MS
+    ) {
+      return cached.usage;
+    }
+
+    if (this.usageInFlight?.key === key) {
+      return this.usageInFlight.promise;
+    }
+
+    const promise = this.metadataSession.getUsageInfo(pat, cwd);
+    this.usageInFlight = { key, promise };
+    try {
+      const usage = await promise;
+      this.usageCache = { key, usage, fetchedAt: Date.now() };
+      return usage;
+    } finally {
+      if (this.usageInFlight?.promise === promise) {
+        this.usageInFlight = undefined;
+      }
+    }
   }
 
   public async provideLanguageModelChatResponse(
@@ -564,12 +605,22 @@ export class QoderModelProvider
     }
   }
 
-  private async getModels(force: boolean): Promise<CatalogLoadResult> {
+  private async getModels(
+    force: boolean,
+    allowNetwork = true,
+  ): Promise<CatalogLoadResult> {
     const now = Date.now();
     if (!force && this.cachedModels && now < this.cacheExpiresAt) {
       return {
         models: this.cachedModels,
         loadedFromQoder: this.cachedLoadedFromQoder,
+      };
+    }
+
+    if (!allowNetwork) {
+      return {
+        models: this.cachedModels ?? deduplicateModels(fallbackModelDescriptors()),
+        loadedFromQoder: this.cachedModels ? this.cachedLoadedFromQoder : false,
       };
     }
 

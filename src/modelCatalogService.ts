@@ -7,6 +7,10 @@ import {
 } from '@qoder-ai/qoder-agent-sdk';
 import { holdSessionOpen } from './sdkSession.js';
 
+// Metadata requests should fail visibly instead of leaving the control center
+// waiting behind the SDK's much longer general-purpose control timeout.
+const METADATA_CONTROL_REQUEST_TIMEOUT_MS = 15_000;
+
 /**
  * A metadata-only Qoder session that stays open while the extension is alive.
  *
@@ -89,6 +93,7 @@ export class QoderMetadataSession {
         auth: accessToken(pat),
         cwd,
         permissionMode: 'auto',
+        controlRequestTimeoutMs: METADATA_CONTROL_REQUEST_TIMEOUT_MS,
       },
     });
     try {

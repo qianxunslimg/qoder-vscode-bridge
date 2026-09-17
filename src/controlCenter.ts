@@ -45,8 +45,14 @@ interface ControlCenterState {
     readonly nativeToolLoop: boolean;
     readonly debugLogging: boolean;
   };
-  readonly usageStatus: 'not-loaded' | 'loaded' | 'unavailable' | 'error';
+  readonly usageStatus:
+    | 'not-loaded'
+    | 'loading'
+    | 'loaded'
+    | 'unavailable'
+    | 'error';
   readonly usageMessage?: string;
+  readonly usageUpdatedAt?: number;
   readonly usage?: UsageSnapshot;
 }
 
@@ -154,6 +160,7 @@ function formatTokens(value: number | undefined): string {
 
 export class QoderControlCenter implements vscode.Disposable {
   private panel: vscode.WebviewPanel | undefined;
+  private latestState: ControlCenterState | undefined;
 
   public constructor(
     private readonly context: vscode.ExtensionContext,
@@ -164,7 +171,7 @@ export class QoderControlCenter implements vscode.Disposable {
   public open(): void {
     if (this.panel) {
       this.panel.reveal(vscode.ViewColumn.One);
-      void this.sendState();
+      void this.sendState(false);
       return;
     }
 
@@ -181,42 +188,46 @@ export class QoderControlCenter implements vscode.Disposable {
     this.panel.webview.html = this.html(this.panel.webview);
     this.panel.onDidDispose(() => {
       this.panel = undefined;
+      this.latestState = undefined;
     }, undefined, this.context.subscriptions);
     this.panel.webview.onDidReceiveMessage(
       (message: ControlCenterMessage) => this.handleMessage(message),
       undefined,
       this.context.subscriptions,
     );
-    void this.sendState();
+    void this.sendState(false);
   }
 
   public dispose(): void {
     this.panel?.dispose();
     this.panel = undefined;
+    this.latestState = undefined;
   }
 
   private async handleMessage(message: ControlCenterMessage): Promise<void> {
     switch (message.type) {
       case 'ready':
-        await this.sendState();
-        // Paint the control center immediately, then load quota data in the
-        // background so a slow account endpoint never blocks the page.
-        void this.sendStateWithUsage();
+        // Paint a local/fallback state first. Catalog and usage are fetched in
+        // parallel afterwards, so the page and its buttons become usable at once.
+        await this.sendState(false);
+        void this.sendStateWithUsage({ refreshCatalog: true, forceUsage: false });
         return;
       case 'refreshModels':
         await this.provider.refreshModels();
-        await this.sendState();
+        await this.sendState(false);
         return;
       case 'refreshUsage':
-        await this.sendStateWithUsage();
+        void this.sendStateWithUsage({ refreshCatalog: false, forceUsage: true });
         return;
       case 'setPat':
         await vscode.commands.executeCommand('qoderBridge.setPat');
-        await this.sendState();
+        await this.sendState(false);
+        void this.sendStateWithUsage({ refreshCatalog: true, forceUsage: true });
         return;
       case 'clearPat':
         await vscode.commands.executeCommand('qoderBridge.clearPat');
-        await this.sendState();
+        this.latestState = undefined;
+        await this.sendState(false);
         return;
       case 'openSettings':
         await vscode.commands.executeCommand(
@@ -229,7 +240,7 @@ export class QoderControlCenter implements vscode.Disposable {
         return;
       case 'setSetting':
         await this.updateSetting(message.key, message.value);
-        await this.sendState();
+        await this.sendState(false);
         return;
       case 'setModelSetting':
         await this.updateModelSetting(
@@ -237,7 +248,7 @@ export class QoderControlCenter implements vscode.Disposable {
           message.key,
           message.value,
         );
-        await this.sendState();
+        await this.sendState(false);
         return;
       default:
         return;
@@ -345,8 +356,8 @@ export class QoderControlCenter implements vscode.Disposable {
     );
   }
 
-  private async state(): Promise<ControlCenterState> {
-    const snapshot = await this.provider.getCatalogSnapshot();
+  private async state(allowNetwork = true): Promise<ControlCenterState> {
+    const snapshot = await this.provider.getCatalogSnapshot(false, allowNetwork);
     const config = readConfig();
     const workspace = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
     return {
@@ -370,14 +381,27 @@ export class QoderControlCenter implements vscode.Disposable {
     };
   }
 
-  private async sendState(): Promise<void> {
+  private async postState(state: ControlCenterState): Promise<void> {
+    if (!this.panel) {
+      return;
+    }
+    this.latestState = state;
+    await this.panel.webview.postMessage({ type: 'state', state });
+  }
+
+  private async sendState(allowNetwork = false): Promise<void> {
     if (!this.panel) {
       return;
     }
     try {
-      await this.panel.webview.postMessage({
-        type: 'state',
-        state: await this.state(),
+      const next = await this.state(allowNetwork);
+      const previous = this.latestState;
+      await this.postState({
+        ...next,
+        usageStatus: previous?.usageStatus ?? next.usageStatus,
+        usageMessage: previous?.usageMessage,
+        usageUpdatedAt: previous?.usageUpdatedAt,
+        usage: previous?.usage,
       });
     } catch (error) {
       await this.panel.webview.postMessage({
@@ -387,49 +411,69 @@ export class QoderControlCenter implements vscode.Disposable {
     }
   }
 
-  private async sendStateWithUsage(): Promise<void> {
+  private async sendStateWithUsage(options: {
+    readonly refreshCatalog: boolean;
+    readonly forceUsage: boolean;
+  }): Promise<void> {
     if (!this.panel) {
       return;
     }
-    const state = await this.state();
+
+    const current = this.latestState ?? await this.state(false);
+    await this.postState({
+      ...current,
+      usageStatus: 'loading',
+      usageMessage: '正在读取 Qoder 用量…',
+    });
+
     const pat = await this.tokenStore.get();
     const cwd = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
     if (!pat || !cwd) {
-      await this.panel.webview.postMessage({
-        type: 'state',
-        state: {
-          ...state,
-          usageStatus: 'unavailable',
-          usageMessage: !pat
-            ? '请先配置 Qoder PAT'
-            : '请先打开一个工作区',
-        },
+      await this.postState({
+        ...current,
+        usageStatus: 'unavailable',
+        usageMessage: !pat
+          ? '请先配置 Qoder PAT'
+          : '请先打开一个工作区',
       });
       return;
     }
-    try {
-      const usage = await this.provider.fetchUsage(pat, cwd);
-      await this.panel.webview.postMessage({
-        type: 'state',
-        state: {
-          ...state,
-          usageStatus: usage ? 'loaded' : 'unavailable',
-          usageMessage: usage
-            ? undefined
-            : 'Qoder 当前没有返回配额明细（可能需要稍后重试）',
-          usage: usage ? usageSnapshotFromInfo(usage) : undefined,
-        },
+
+    const statePromise = this.state(options.refreshCatalog);
+    const usagePromise = this.provider.fetchUsage(pat, cwd, {
+      force: options.forceUsage,
+    });
+    const [stateResult, usageResult] = await Promise.allSettled([
+      statePromise,
+      usagePromise,
+    ]);
+    const nextState = stateResult.status === 'fulfilled'
+      ? stateResult.value
+      : current;
+
+    if (usageResult.status === 'fulfilled') {
+      const usage = usageResult.value;
+      await this.postState({
+        ...nextState,
+        usageStatus: usage ? 'loaded' : 'unavailable',
+        usageMessage: usage
+          ? undefined
+          : 'Qoder 当前没有返回配额明细（可能需要稍后重试）',
+        usageUpdatedAt: usage ? Date.now() : current.usageUpdatedAt,
+        usage: usage ? usageSnapshotFromInfo(usage) : current.usage,
       });
-    } catch (error) {
-      await this.panel.webview.postMessage({
-        type: 'state',
-        state: {
-          ...state,
-          usageStatus: 'error',
-          usageMessage: error instanceof Error ? error.message : String(error),
-        },
-      });
+      return;
     }
+
+    await this.postState({
+      ...nextState,
+      usageStatus: 'error',
+      usageMessage: usageResult.reason instanceof Error
+        ? usageResult.reason.message
+        : String(usageResult.reason),
+      usage: current.usage,
+      usageUpdatedAt: current.usageUpdatedAt,
+    });
   }
 
   private html(webview: vscode.Webview): string {
@@ -510,6 +554,13 @@ export class QoderControlCenter implements vscode.Disposable {
     .usage-progress { height: 7px; margin: 1px 0 2px; background: #29313d; border-radius: 99px; overflow: hidden; }
     .usage-progress span { display: block; height: 100%; background: var(--good); border-radius: inherit; }
     .usage-meta { color: var(--muted); font-size: 11px; }
+    .usage-actions { display: inline-flex; align-items: center; gap: 8px; }
+    .usage-state { color: var(--muted); font-size: 11px; }
+    .usage-state.good { color: var(--good); }
+    .usage-state.warn { color: var(--warn); }
+    .usage-refresh[disabled] { cursor: wait; opacity: .75; }
+    .spinner { width: 10px; height: 10px; display: inline-block; border: 2px solid #526071; border-top-color: var(--accent); border-radius: 50%; animation: qoder-spin .8s linear infinite; vertical-align: -1px; }
+    @keyframes qoder-spin { to { transform: rotate(360deg); } }
     .repo-link { padding: 0; border: 0; background: transparent; color: #9ecbff; font-size: 11px; }
     .repo-link:hover { color: var(--text); border: 0; }
     .usage-empty { color: var(--muted); }
@@ -591,6 +642,11 @@ export class QoderControlCenter implements vscode.Disposable {
       const date = new Date(value);
       return Number.isNaN(date.getTime()) ? '' : new Intl.DateTimeFormat('zh-CN', { year: 'numeric', month: '2-digit', day: '2-digit' }).format(date);
     };
+    const timeLabel = (value) => {
+      if (value === undefined || value === null) return '';
+      const date = new Date(value);
+      return Number.isNaN(date.getTime()) ? '' : new Intl.DateTimeFormat('zh-CN', { hour: '2-digit', minute: '2-digit', second: '2-digit' }).format(date);
+    };
     const factorLabel = (model) => {
       if (typeof model.priceFactor === 'number' && model.priceFactor > 0) return model.priceFactor.toFixed(2).replace(/0+$/, '').replace(/\\.$/, '') + 'x';
       if (model.isFree) return '免费（Qoder目录）';
@@ -618,6 +674,15 @@ export class QoderControlCenter implements vscode.Disposable {
     function render(state) {
       currentState = state;
       const config = state.config;
+      const usageLoading = state.usageStatus === 'loading';
+      const usageButtonLabel = usageLoading ? '读取中…' : (state.usageStatus === 'error' ? '重试' : '刷新');
+      const usageStateLabel = usageLoading
+        ? '<span class="usage-state"><span class="spinner"></span>正在请求 Qoder 用量</span>'
+        : state.usageStatus === 'loaded'
+          ? '<span class="usage-state good">已更新 ' + escapeHtml(timeLabel(state.usageUpdatedAt)) + '</span>'
+          : state.usageStatus === 'error'
+            ? '<span class="usage-state warn">读取失败，可重试</span>'
+            : '';
       const models = (state.models || []).filter((model) => {
         const haystack = (model.name + ' ' + model.id + ' ' + (model.description || '')).toLowerCase();
         return !query || haystack.includes(query.toLowerCase());
@@ -641,7 +706,7 @@ export class QoderControlCenter implements vscode.Disposable {
           '</div>' +
           '<div class="actions" style="margin-top:10px;justify-content:flex-start"><button data-action="setPat">配置 PAT</button><button class="danger" data-action="clearPat">清除 PAT</button></div>' +
         '</section>' +
-        '<section class="section"><div class="section-head"><h2>用量</h2><button data-action="refreshUsage">刷新</button></div>' + usageMarkup(state) + '</section>' +
+        '<section class="section"><div class="section-head"><h2>用量</h2><div class="usage-actions">' + usageStateLabel + '<button class="usage-refresh" data-action="refreshUsage"' + (usageLoading ? ' disabled' : '') + '>' + usageButtonLabel + '</button></div></div>' + usageMarkup(state) + '</section>' +
         '<section class="section"><div class="section-head"><div><h2>模型目录</h2><div class="subtitle">上下文窗口和推理强度在每张模型卡内单独设置。</div></div><div class="actions"><button data-action="refreshModels">刷新</button><input type="search" placeholder="搜索名称或 ID" value="' + escapeHtml(query) + '" data-search="models" /></div></div>' +
           (models.length ? '<div class="models">' + models.map(renderModel).join('') + '</div>' : '<div class="empty">没有匹配的模型。</div>') +
         '</section>';
@@ -650,6 +715,10 @@ export class QoderControlCenter implements vscode.Disposable {
       const target = event.target.closest('[data-action]');
       if (!target) return;
       event.preventDefault();
+      if (target.dataset.action === 'refreshUsage') {
+        target.disabled = true;
+        target.textContent = '读取中…';
+      }
       vscode.postMessage({ type: target.dataset.action });
     });
     document.addEventListener('change', (event) => {
