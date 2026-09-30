@@ -43,6 +43,19 @@ function entryCost(entry: PromptEntry): number {
   return entry.label.length + entry.text.length + 4;
 }
 
+function compactLatestMessage(text: string, available: number): string {
+  if (text.length <= available) {
+    return text;
+  }
+  const marker = '\n[Middle of latest message omitted]\n';
+  if (available <= marker.length + 1) {
+    return text.slice(0, available);
+  }
+  const retained = available - marker.length;
+  const tailLength = Math.max(1, Math.floor(retained * 0.4));
+  return text.slice(0, retained - tailLength) + marker + text.slice(-tailLength);
+}
+
 /** Keep recent conversation context within a deterministic character budget. */
 export function compactPromptEntries(
   entries: readonly PromptEntry[],
@@ -88,13 +101,15 @@ export function compactPromptEntries(
       continue;
     }
 
-    // Always retain the newest entry, even when that individual message is
-    // larger than the whole budget. The tail contains the current request in
-    // Copilot's prompt envelope.
+    // The latest request may put its instructions before a large attachment.
+    // Retain both ends so the instruction cannot disappear behind the limit.
     const available = Math.max(0, budget - entry.label.length - 4);
+    if (available === 0) {
+      continue;
+    }
     kept.unshift({
       label: entry.label,
-      text: entry.text.slice(-available),
+      text: compactLatestMessage(entry.text, available),
     });
     used = entryCost(kept[0]);
   }

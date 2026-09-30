@@ -1,5 +1,8 @@
 import * as vscode from 'vscode';
 import { DEFAULT_MAX_INLINE_REFERENCE_CHARS } from './referenceAdapter.js';
+import { DEFAULT_SDK_IDLE_TIMEOUT_MS } from './sdkIdleTimeout.js';
+
+export { DEFAULT_SDK_IDLE_TIMEOUT_MS } from './sdkIdleTimeout.js';
 
 export type ReasoningEffort =
   | 'auto'
@@ -22,6 +25,7 @@ export interface BridgeConfig {
   readonly showActivity: boolean;
   readonly nativeToolLoop: boolean;
   readonly nativeToolResultTimeoutMs: number;
+  readonly sdkIdleTimeoutMs: number;
   readonly debugLogging: boolean;
   readonly maxNativeTools: number;
   readonly maxInlineReferenceChars: number;
@@ -30,6 +34,8 @@ export interface BridgeConfig {
 export const DEFAULT_NATIVE_TOOL_RESULT_TIMEOUT_MS = 5 * 60 * 1000;
 export const MIN_NATIVE_TOOL_RESULT_TIMEOUT_MS = 5 * 1000;
 export const MAX_NATIVE_TOOL_RESULT_TIMEOUT_MS = 30 * 60 * 1000;
+export const MIN_SDK_IDLE_TIMEOUT_MS = 30 * 1000;
+export const MAX_SDK_IDLE_TIMEOUT_MS = 30 * 60 * 1000;
 
 const REASONING_EFFORTS: readonly ReasoningEffort[] = [
   'auto',
@@ -103,6 +109,16 @@ export function readConfig(): BridgeConfig {
         ),
       )
     : DEFAULT_NATIVE_TOOL_RESULT_TIMEOUT_MS;
+  const configuredSdkIdleTimeoutMs = configuration.get<number>(
+    'sdkIdleTimeoutMs',
+    DEFAULT_SDK_IDLE_TIMEOUT_MS,
+  );
+  const sdkIdleTimeoutMs = Number.isFinite(configuredSdkIdleTimeoutMs)
+    ? Math.max(
+        MIN_SDK_IDLE_TIMEOUT_MS,
+        Math.min(MAX_SDK_IDLE_TIMEOUT_MS, configuredSdkIdleTimeoutMs),
+      )
+    : DEFAULT_SDK_IDLE_TIMEOUT_MS;
   const maxInlineReferenceChars = Math.max(
     0,
     Math.min(
@@ -124,6 +140,7 @@ export function readConfig(): BridgeConfig {
     showActivity: configuration.get<boolean>('showActivity', true),
     nativeToolLoop: configuration.get<boolean>('nativeToolLoop', true),
     nativeToolResultTimeoutMs,
+    sdkIdleTimeoutMs,
     debugLogging: configuration.get<boolean>('debugLogging', true),
     maxNativeTools,
     maxInlineReferenceChars,

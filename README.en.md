@@ -42,7 +42,7 @@ There is no need to type `@qoder`. Run `Qoder: Clear Personal Access Token` to r
 
 Runtime settings (turn limit, tool timeout, activity summaries, and so on) are user-level settings. Context and reasoning controls on model cards are stored by model ID, so switching projects or conversations does not reset them.
 
-Approval for host tools is controlled by VS Code Chat; the extension does not expose a second permission dropdown. When the SDK fallback path runs without host tools, it keeps the internal `bypassPermissions` behavior.
+VS Code Chat controls approval for host tools; the extension has no second permission setting. When Chat supplies no host tools, the request is text-only and cannot invoke SDK built-in tools.
 
 ## Settings
 
@@ -56,6 +56,7 @@ Search for `Qoder Bridge` in VS Code Settings or edit user settings directly.
 | `qoderBridge.showActivity` | `true` | Show tool, task, retry, and completion summaries. |
 | `qoderBridge.nativeToolLoop` | `true` | Use VS Code's native tool loop. |
 | `qoderBridge.nativeToolResultTimeoutMs` | `300000` | Maximum wait for a host-tool result, in milliseconds. Range `5000`-`1800000`. |
+| `qoderBridge.sdkIdleTimeoutMs` | `300000` | Maximum wait without a model message, in milliseconds; does not limit running host tools. |
 | `qoderBridge.debugLogging` | `true` | Log loop metadata without prompts, file contents, or tokens. |
 | `qoderBridge.maxNativeTools` | `91` | Maximum host tools exposed to one request. |
 | `qoderBridge.maxInlineReferenceChars` | `24000` | Maximum selected or pasted characters copied into the prompt. |
@@ -71,7 +72,7 @@ Search for `Qoder Bridge` in VS Code Settings or edit user settings directly.
 
 - **Empty model catalog:** configure the PAT, then run `Qoder: Refresh Model Catalog`.
 - **Missing images or references:** use a vision-capable model; whole-file references depend on VS Code's `read_file` tool, and the fallback cannot read outside the workspace.
-- **Long-running tools:** increase `qoderBridge.nativeToolResultTimeoutMs` and inspect the Qoder extension-host log with `qoderBridge.debugLogging` enabled.
+- **Long-running tools:** increase `qoderBridge.nativeToolResultTimeoutMs` for slow host tools, or adjust `qoderBridge.sdkIdleTimeoutMs` for a silent model stream. Enable debug logging to inspect the wait boundary.
 - **`session expired`:** wait for or cancel the running host tool, then use Chat's retry action.
 
 ## Development

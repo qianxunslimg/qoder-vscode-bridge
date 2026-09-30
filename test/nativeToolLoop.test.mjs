@@ -14,7 +14,11 @@ const {
   normalizeNativeToolInput,
   terminalNotificationToolResult,
 } = await import('../out/nativeToolLoop.js');
-const { QoderModelProvider } = await import('../out/provider.js');
+const {
+  QoderModelProvider,
+  TEXT_ONLY_FALLBACK_TOOL_POLICY,
+} = await import('../out/provider.js');
+const { waitForSdkMessage } = await import('../out/sdkIdleTimeout.js');
 
 function cancellationToken() {
   return {
@@ -24,6 +28,45 @@ function cancellationToken() {
     },
   };
 }
+
+test('SDK fallback disables built-in tools and denies attempted tool use', async () => {
+  assert.deepEqual(TEXT_ONLY_FALLBACK_TOOL_POLICY.tools, []);
+  assert.equal(TEXT_ONLY_FALLBACK_TOOL_POLICY.permissionMode, 'default');
+  assert.deepEqual(TEXT_ONLY_FALLBACK_TOOL_POLICY.settingSources, []);
+  assert.equal(TEXT_ONLY_FALLBACK_TOOL_POLICY.strictMcpConfig, true);
+  assert.deepEqual(
+    await TEXT_ONLY_FALLBACK_TOOL_POLICY.canUseTool('Bash', {}, {}),
+    { behavior: 'deny', message: 'Tool use requires VS Code Chat host tools.' },
+  );
+});
+
+test('SDK timeout keeps its error when cleanup aborts the same signal', async () => {
+  const controller = new AbortController();
+  await assert.rejects(
+    waitForSdkMessage(
+      () => new Promise(() => {}),
+      20,
+      () => controller.abort(),
+      controller.signal,
+    ),
+    /Qoder SDK did not produce a message within 1 second/,
+  );
+  assert.equal(controller.signal.aborted, true);
+});
+
+test('SDK wait exits immediately on user cancellation without firing idle timeout', async () => {
+  const controller = new AbortController();
+  let timedOut = false;
+  const waiting = waitForSdkMessage(
+    () => new Promise(() => {}),
+    100,
+    () => { timedOut = true; },
+    controller.signal,
+  );
+  controller.abort();
+  await assert.rejects(waiting, { name: 'AbortError' });
+  assert.equal(timedOut, false);
+});
 
 test('does not stringify an image prompt when adding native tool instructions', async () => {
   const prompt = (await import('../out/messageAdapter.js')).messagesToPrompt([
@@ -230,6 +273,7 @@ test('does not apply maxTurns as a second per-tool call limit', async () => {
     },
   };
   const session = Object.create(NativeQoderSession.prototype);
+  session.queuedToolCalls = [];
   session.messages = {
     async next() {
       return {
@@ -275,8 +319,10 @@ test('does not apply maxTurns as a second per-tool call limit', async () => {
 test('cancels a native session when the host tool queue never dispatches', async () => {
   const proxyName = 'qoder_native_0_read_file';
   const session = Object.create(NativeQoderSession.prototype);
+  session.queuedToolCalls = [];
   let cancelledReason;
   session.nativeToolResultTimeoutMs = 20;
+  session.sdkIdleTimeoutMs = 20;
   session.closed = false;
   session.messages = {
     async next() {
@@ -296,21 +342,31 @@ test('cancels a native session when the host tool queue never dispatches', async
   session.proxyTools = new Map([
     [proxyName, { name: 'read_file', proxyName }],
   ]);
+  let rejectWaitingProxy;
+  const proxyQueue = {
+    next() {
+      return new Promise((_, reject) => { rejectWaitingProxy = reject; });
+    },
+    close(error) {
+      rejectWaitingProxy?.(error);
+    },
+  };
   session.proxyRequests = new Map([
-    [proxyName, { async next() { return new Promise(() => {}); } }],
+    [proxyName, proxyQueue],
   ]);
   session.seenToolCalls = new Set();
   session.pendingCalls = new Map();
   session.cancel = async (reason) => {
     cancelledReason = reason;
     session.closed = true;
+    proxyQueue.close(new Error('queue closed during cancellation'));
   };
 
   await assert.rejects(
     session.consumeUntilBoundary({ report() {} }),
-    /did not return a result within 1 seconds/,
+    /did not dispatch native proxy .* within 1 second/,
   );
-  assert.match(cancelledReason, /cancel the request and retry/);
+  assert.match(cancelledReason, /qoderBridge\.sdkIdleTimeoutMs/);
 });
 
 test('cancels a native session when VS Code never returns the host result', async () => {
@@ -332,6 +388,7 @@ test('cancels a native session when VS Code never returns the host result', asyn
     },
   };
   const session = Object.create(NativeQoderSession.prototype);
+  session.queuedToolCalls = [];
   let cancelledReason;
   session.nativeToolResultTimeoutMs = 20;
   session.closed = false;
@@ -404,6 +461,7 @@ test('clears the native result watchdog after a successful host result', async (
     { type: 'result', subtype: 'success', result: 'done', errors: [] },
   ];
   const session = Object.create(NativeQoderSession.prototype);
+  session.queuedToolCalls = [];
   let cancelled = false;
   let closed = 0;
   session.nativeToolResultTimeoutMs = 20;
@@ -446,6 +504,435 @@ test('clears the native result watchdog after a successful host result', async (
   });
 });
 
+test('SDK idle timeout does not limit the VS Code host tool runtime', async () => {
+  const proxyName = 'qoder_native_0_read_file';
+  let resolveResult;
+  const proxyRequest = {
+    proxyName,
+    input: { filePath: 'README.md' },
+    result: {
+      promise: new Promise((resolve) => { resolveResult = resolve; }),
+      resolve(value) { resolveResult(value); },
+      reject() {},
+    },
+  };
+  const messages = [
+    {
+      type: 'assistant',
+      message: {
+        content: [{
+          type: 'tool_use',
+          id: 'toolu_long_host_operation',
+          name: proxyName,
+          input: proxyRequest.input,
+        }],
+      },
+    },
+    { type: 'result', subtype: 'success', result: 'done', errors: [] },
+  ];
+  const session = Object.create(NativeQoderSession.prototype);
+  session.queuedToolCalls = [];
+  session.sdkIdleTimeoutMs = 20;
+  session.nativeToolResultTimeoutMs = 1_000;
+  session.closed = false;
+  session.messages = { async next() { return messages.shift(); } };
+  session.proxyTools = new Map([[proxyName, { name: 'read_file', proxyName }]]);
+  session.proxyRequests = new Map([
+    [proxyName, { async next() { return proxyRequest; } }],
+  ]);
+  session.seenToolCalls = new Set();
+  session.pendingCalls = new Map();
+  session.close = async () => {};
+  let cancelled = false;
+  session.cancel = async () => { cancelled = true; };
+
+  const boundary = await session.consumeUntilBoundary({ report() {} });
+  assert.equal(boundary.kind, 'tool_call');
+  await new Promise((resolve) => setTimeout(resolve, 60));
+  assert.equal(cancelled, false);
+  const done = await session.continueWithToolResult({
+    callId: boundary.invocation.callId,
+    text: 'host result',
+    isError: false,
+  }, { report() {} });
+  assert.deepEqual(done, { kind: 'done' });
+});
+
+test('cancels when the SDK stops producing messages after a host result', async () => {
+  const session = Object.create(NativeQoderSession.prototype);
+  session.queuedToolCalls = [];
+  session.sdkIdleTimeoutMs = 20;
+  session.nativeToolResultTimeoutMs = 1_800_000;
+  session.closed = false;
+  session.messages = { next: () => new Promise(() => {}) };
+  let cancelledReason;
+  session.cancel = async (reason) => {
+    cancelledReason = reason;
+    session.closed = true;
+  };
+
+  let safetyTimeout;
+  try {
+    await assert.rejects(
+      Promise.race([
+        session.consumeUntilBoundary({ report() {} }),
+        new Promise((_, reject) => {
+          safetyTimeout = setTimeout(() => {
+            reject(new Error('SDK idle watchdog did not fire'));
+          }, 150);
+        }),
+      ]),
+      /Qoder SDK did not produce a message within 1 second/,
+    );
+  } finally {
+    clearTimeout(safetyTimeout);
+  }
+  assert.match(cancelledReason, /qoderBridge\.sdkIdleTimeoutMs/);
+});
+
+test('SDK idle timeout resets on each message and never caps an active session', async () => {
+  const messages = [
+    { type: 'stream_event', event: { delta: { type: 'text_delta', text: 'a' } } },
+    { type: 'stream_event', event: { delta: { type: 'text_delta', text: 'b' } } },
+    { type: 'stream_event', event: { delta: { type: 'text_delta', text: 'c' } } },
+    { type: 'result', subtype: 'success', result: 'abc', errors: [] },
+  ];
+  const session = Object.create(NativeQoderSession.prototype);
+  session.queuedToolCalls = [];
+  session.sdkIdleTimeoutMs = 50;
+  session.closed = false;
+  session.messages = {
+    async next() {
+      await new Promise((resolve) => setTimeout(resolve, 25));
+      return messages.shift();
+    },
+  };
+  let cancelled = false;
+  let closed = false;
+  session.cancel = async () => { cancelled = true; };
+  session.close = async () => { closed = true; };
+  const chunks = [];
+
+  const boundary = await session.consumeUntilBoundary({
+    report(part) { chunks.push(part.value); },
+  });
+
+  assert.deepEqual(boundary, { kind: 'done' });
+  assert.deepEqual(chunks, ['a', 'b', 'c']);
+  assert.equal(closed, true);
+  assert.equal(cancelled, false);
+});
+
+test('dispatches every tool use from one assistant message', async () => {
+  const proxyName = 'qoder_native_0_read_file';
+  const requests = ['first.txt', 'second.txt'].map((filePath) => {
+    let resolve;
+    const promise = new Promise((done) => { resolve = done; });
+    return {
+      proxyName,
+      input: { filePath },
+      result: { promise, resolve, reject() {} },
+    };
+  });
+  const messages = [
+    {
+      type: 'assistant',
+      message: {
+        content: requests.map((request, index) => ({
+          type: 'tool_use',
+          id: `toolu_parallel_${index + 1}`,
+          name: proxyName,
+          input: request.input,
+        })),
+      },
+    },
+    { type: 'result', subtype: 'success', result: 'done', errors: [] },
+  ];
+  const session = Object.create(NativeQoderSession.prototype);
+  session.queuedToolCalls = [];
+  session.nativeToolResultTimeoutMs = 1_000;
+  session.closed = false;
+  session.messages = { async next() { return messages.shift(); } };
+  session.proxyTools = new Map([[proxyName, { name: 'read_file', proxyName }]]);
+  session.proxyRequests = new Map([
+    [proxyName, { async next() { return requests.shift(); } }],
+  ]);
+  session.seenToolCalls = new Set();
+  session.pendingCalls = new Map();
+  session.close = async () => {};
+
+  const first = await session.consumeUntilBoundary({ report() {} });
+  assert.equal(first.invocation.callId, 'qoder-native-toolu_parallel_1');
+  assert.deepEqual(first.invocation.input, { filePath: 'first.txt' });
+
+  const second = await session.continueWithToolResult({
+    callId: first.invocation.callId,
+    text: 'first result',
+    isError: false,
+  }, { report() {} });
+  assert.equal(second.invocation.callId, 'qoder-native-toolu_parallel_2');
+  assert.deepEqual(second.invocation.input, { filePath: 'second.txt' });
+
+  const done = await session.continueWithToolResult({
+    callId: second.invocation.callId,
+    text: 'second result',
+    isError: false,
+  }, { report() {} });
+  assert.deepEqual(done, { kind: 'done' });
+  assert.equal(session.pendingCalls.size, 0);
+});
+
+test('matches parallel callbacks by input when one proxy queues them out of order', async () => {
+  const proxyName = 'qoder_native_0_read_file';
+  const requests = ['second.txt', 'first.txt'].map((filePath) => {
+    let resolve;
+    const promise = new Promise((done) => { resolve = done; });
+    return {
+      proxyName,
+      input: { filePath },
+      result: { promise, resolve, reject() {} },
+    };
+  });
+  const messages = [
+    {
+      type: 'assistant',
+      message: {
+        content: ['first.txt', 'second.txt'].map((filePath, index) => ({
+          type: 'tool_use',
+          id: `toolu_reordered_${index + 1}`,
+          name: proxyName,
+          input: { filePath },
+        })),
+      },
+    },
+    { type: 'result', subtype: 'success', result: 'done', errors: [] },
+  ];
+  const session = Object.create(NativeQoderSession.prototype);
+  session.queuedToolCalls = [];
+  session.unmatchedProxyRequests = new Map();
+  session.nativeToolResultTimeoutMs = 1_000;
+  session.closed = false;
+  session.messages = { async next() { return messages.shift(); } };
+  session.proxyTools = new Map([[proxyName, { name: 'read_file', proxyName }]]);
+  session.proxyRequests = new Map([
+    [proxyName, { async next() { return requests.shift(); } }],
+  ]);
+  session.seenToolCalls = new Set();
+  session.pendingCalls = new Map();
+  session.close = async () => {};
+
+  const first = await session.consumeUntilBoundary({ report() {} });
+  assert.equal(first.invocation.callId, 'qoder-native-toolu_reordered_1');
+  assert.deepEqual(first.invocation.input, { filePath: 'first.txt' });
+
+  const second = await session.continueWithToolResult({
+    callId: first.invocation.callId,
+    text: 'first result',
+    isError: false,
+  }, { report() {} });
+  assert.equal(second.invocation.callId, 'qoder-native-toolu_reordered_2');
+  assert.deepEqual(second.invocation.input, { filePath: 'second.txt' });
+
+  const done = await session.continueWithToolResult({
+    callId: second.invocation.callId,
+    text: 'second result',
+    isError: false,
+  }, { report() {} });
+  assert.deepEqual(done, { kind: 'done' });
+});
+
+test('matches a proxy callback after Zod strips undeclared input fields', async () => {
+  const proxyName = 'qoder_native_0_read_file';
+  const proxyRequest = {
+    proxyName,
+    input: { filePath: 'README.md' },
+    result: {
+      promise: Promise.resolve(),
+      resolve() {},
+      reject() {},
+    },
+  };
+  const session = Object.create(NativeQoderSession.prototype);
+  session.queuedToolCalls = [];
+  session.unmatchedProxyRequests = new Map();
+  session.nativeToolResultTimeoutMs = 20;
+  session.closed = false;
+  session.messages = {
+    async next() {
+      return {
+        type: 'assistant',
+        message: {
+          content: [{
+            type: 'tool_use',
+            id: 'toolu_zod_strips_unknown',
+            name: proxyName,
+            input: { filePath: 'README.md', undeclared: 'removed by Zod' },
+          }],
+        },
+      };
+    },
+  };
+  session.proxyTools = new Map([[proxyName, {
+    name: 'read_file',
+    proxyName,
+    inputSchema: {
+      type: 'object',
+      properties: { filePath: { type: 'string' } },
+      required: ['filePath'],
+    },
+  }]]);
+  let requestDelivered = false;
+  session.proxyRequests = new Map([
+    [proxyName, {
+      async next() {
+        if (requestDelivered) {
+          return new Promise(() => {});
+        }
+        requestDelivered = true;
+        return proxyRequest;
+      },
+    }],
+  ]);
+  session.seenToolCalls = new Set();
+  session.pendingCalls = new Map();
+  session.cancel = async () => {};
+
+  const boundary = await session.consumeUntilBoundary({ report() {} });
+  assert.equal(boundary.kind, 'tool_call');
+  assert.deepEqual(boundary.invocation.input, { filePath: 'README.md' });
+  clearTimeout(session.pendingCalls.get(boundary.invocation.callId).timeout);
+});
+
+test('rejects a single proxy callback with mismatched arguments', async () => {
+  const proxyName = 'qoder_native_0_read_file';
+  let rejectResult;
+  const proxyResult = new Promise((_, reject) => { rejectResult = reject; });
+  const rejected = proxyResult.catch((error) => error);
+  const session = Object.create(NativeQoderSession.prototype);
+  session.queuedToolCalls = [];
+  session.unmatchedProxyRequests = new Map();
+  session.nativeToolResultTimeoutMs = 1_000;
+  session.sdkIdleTimeoutMs = 20;
+  session.closed = false;
+  session.messages = {
+    async next() {
+      return {
+        type: 'assistant',
+        message: {
+          content: [{
+            type: 'tool_use',
+            id: 'toolu_expected',
+            name: proxyName,
+            input: { filePath: 'expected.txt' },
+          }],
+        },
+      };
+    },
+  };
+  session.proxyTools = new Map([[proxyName, { name: 'read_file', proxyName }]]);
+  session.proxyRequests = new Map([[proxyName, {
+    async next() {
+      return {
+        proxyName,
+        input: { filePath: 'wrong.txt' },
+        result: { promise: proxyResult, resolve() {}, reject: rejectResult },
+      };
+    },
+  }]]);
+  session.seenToolCalls = new Set();
+  session.pendingCalls = new Map();
+
+  await assert.rejects(
+    session.consumeUntilBoundary({ report() {} }),
+    /arguments that do not match the pending tool call/,
+  );
+  assert.match((await rejected).message, /arguments that do not match/);
+});
+
+test('cancellation rejects deferred proxy callbacks', async () => {
+  let rejectResult;
+  const proxyResult = new Promise((_, reject) => { rejectResult = reject; });
+  const rejected = proxyResult.catch((error) => error);
+  const session = Object.create(NativeQoderSession.prototype);
+  session.closed = false;
+  session.pendingCalls = new Map();
+  session.messages = { close() {} };
+  session.proxyRequests = new Map();
+  session.unmatchedProxyRequests = new Map([['proxy', [{
+    proxyName: 'proxy',
+    input: {},
+    result: { promise: proxyResult, resolve() {}, reject: rejectResult },
+  }]]]);
+  session.abortController = new AbortController();
+  session.q = { async close() {} };
+  session.pumpPromise = Promise.resolve();
+
+  await session.cancel();
+
+  assert.equal(session.unmatchedProxyRequests.size, 0);
+  assert.match((await rejected).message, /cancelled/);
+});
+
+test('cancel does not wait for an unresponsive SDK interrupt', async () => {
+  const session = Object.create(NativeQoderSession.prototype);
+  session.closed = false;
+  session.messages = { close() {} };
+  session.proxyRequests = new Map();
+  session.pendingCalls = new Map();
+  session.abortController = new AbortController();
+  session.pumpPromise = Promise.resolve();
+  let closeCalled = false;
+  session.q = {
+    interrupt: () => new Promise(() => {}),
+    close: async () => { closeCalled = true; },
+  };
+
+  let safetyTimeout;
+  try {
+    await Promise.race([
+      session.cancel('test cancellation'),
+      new Promise((_, reject) => {
+        safetyTimeout = setTimeout(() => reject(new Error('cancel stalled')), 150);
+      }),
+    ]);
+  } finally {
+    clearTimeout(safetyTimeout);
+  }
+  assert.equal(session.abortController.signal.aborted, true);
+  assert.equal(closeCalled, true);
+});
+
+test('close does not wait for an unresponsive SDK shutdown', async () => {
+  const session = Object.create(NativeQoderSession.prototype);
+  session.closed = false;
+  session.messages = { close() {} };
+  session.proxyRequests = new Map();
+  session.pendingCalls = new Map();
+  session.abortController = new AbortController();
+  session.pumpPromise = new Promise(() => {});
+  let closeCalled = false;
+  session.q = {
+    close: () => {
+      closeCalled = true;
+      return new Promise(() => {});
+    },
+  };
+
+  let safetyTimeout;
+  try {
+    await Promise.race([
+      session.close(),
+      new Promise((_, reject) => {
+        safetyTimeout = setTimeout(() => reject(new Error('close stalled')), 150);
+      }),
+    ]);
+  } finally {
+    clearTimeout(safetyTimeout);
+  }
+  assert.equal(session.abortController.signal.aborted, true);
+  assert.equal(closeCalled, true);
+});
+
 test('provider restarts from transcript when a native result has no live session', async () => {
   const callId = 'qoder-native-stale-call';
   const messages = [
@@ -481,7 +968,7 @@ test('provider restarts from transcript when a native result has no live session
   });
   provider.startNativeSession = async (...args) => {
     restartCount += 1;
-    assert.equal(args[4], messages);
+    assert.equal(args[5], messages);
   };
 
   await provider.provideLanguageModelChatResponse(

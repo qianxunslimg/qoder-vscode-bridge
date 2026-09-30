@@ -42,7 +42,7 @@ npm run package
 
 运行设置（最大轮数、工具超时、活动摘要等）是用户级设置；模型卡片里的上下文窗口和推理强度按模型 ID 保存，切换项目或会话不会重置。
 
-宿主工具的审批由 VS Code Chat 控制，扩展不再提供权限下拉框。没有宿主工具、走 SDK 回退路径时，扩展内部仍使用 `bypassPermissions`。
+宿主工具的审批由 VS Code Chat 控制，扩展不提供第二套权限设置。Chat 未提供宿主工具时，请求仅能进行文本对话；不会调用 SDK 内置工具。
 
 ## 配置项
 
@@ -56,6 +56,7 @@ npm run package
 | `qoderBridge.showActivity` | `true` | 显示工具、任务、重试和完成摘要。 |
 | `qoderBridge.nativeToolLoop` | `true` | 使用 VS Code 原生工具循环。 |
 | `qoderBridge.nativeToolResultTimeoutMs` | `300000` | 等待宿主工具结果的最长时间（毫秒）。范围 `5000`-`1800000`。 |
+| `qoderBridge.sdkIdleTimeoutMs` | `300000` | 等待模型消息时允许无响应的时长（毫秒）；不限制正在执行的宿主工具。 |
 | `qoderBridge.debugLogging` | `true` | 在扩展宿主日志中记录链路元数据，不记录 prompt、文件内容或令牌。 |
 | `qoderBridge.maxNativeTools` | `91` | 单次请求暴露的宿主工具上限。 |
 | `qoderBridge.maxInlineReferenceChars` | `24000` | 选区或粘贴文本直接放入 prompt 的字符上限。 |
@@ -71,7 +72,7 @@ npm run package
 
 - **模型目录为空**：先配置 PAT，再执行 `Qoder: Refresh Model Catalog`。
 - **图片或引用没有生效**：图片需要视觉模型；完整文件依赖 VS Code 的 `read_file` 工具，工作区外路径不能由回退工具读取。
-- **长任务超时**：提高 `qoderBridge.nativeToolResultTimeoutMs`；打开 `qoderBridge.debugLogging` 后查看 Qoder 扩展宿主日志。
+- **长任务超时**：宿主工具执行慢可提高 `qoderBridge.nativeToolResultTimeoutMs`；模型长时间无消息可调整 `qoderBridge.sdkIdleTimeoutMs`。打开调试日志可查看等待边界。
 - **`session expired`**：先等待或取消仍在运行的宿主工具，再使用 Chat 的重试操作。
 
 ## 开发

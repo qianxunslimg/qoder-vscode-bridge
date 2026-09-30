@@ -157,6 +157,22 @@ test('keeps ordinary text prompts on the existing string path', () => {
   assert.match(prompt, /你好/);
 });
 
+test('keeps a long current request intact when the selected model has room', () => {
+  const longRequest = `FIX_THIS_FIRST\n${'x'.repeat(25_000)}MIDDLE_REFERENCE${'y'.repeat(25_000)}\nEND_REFERENCE`;
+  const prompt = messagesToPrompt([
+    {
+      role: vscode.LanguageModelChatMessageRole.User,
+      content: [new vscode.LanguageModelTextPart(longRequest)],
+    },
+  ], { maxPromptChars: 750_000 });
+
+  assert.equal(typeof prompt, 'string');
+  assert.match(prompt, /FIX_THIS_FIRST/);
+  assert.match(prompt, /MIDDLE_REFERENCE/);
+  assert.match(prompt, /END_REFERENCE/);
+  assert.doesNotMatch(prompt, /Middle of latest message omitted/);
+});
+
 test('forwards pasted text data instead of replacing it with a MIME placeholder', () => {
   const prompt = messagesToPrompt([
     {

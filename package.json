@@ -2,7 +2,7 @@
   "name": "qoder-vscode-bridge",
   "displayName": "Qoder Team Bridge for VS Code Chat",
   "description": "An independent VS Code companion for Qoder Team and business accounts, bringing Qoder models to VS Code Chat where the official Qoder plugin is unavailable.",
-  "version": "1.0.2",
+  "version": "1.0.3",
   "publisher": "qianxunslimg",
   "license": "MIT",
   "repository": {
@@ -144,6 +144,13 @@
           "maximum": 1800000,
           "default": 300000,
           "description": "Maximum time to wait for VS Code to return a native tool result before cancelling the Qoder session. Increase this for long-running builds or tests."
+        },
+        "qoderBridge.sdkIdleTimeoutMs": {
+          "type": "number",
+          "minimum": 30000,
+          "maximum": 1800000,
+          "default": 300000,
+          "description": "Maximum time without a Qoder SDK message while waiting for the model. Does not limit a running VS Code host tool."
         },
         "qoderBridge.debugLogging": {
           "type": "boolean",

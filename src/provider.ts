@@ -41,11 +41,24 @@ import {
   selectNativeTools,
   type NativeToolDescriptor,
 } from './nativeToolPolicy.js';
+import { waitForSdkMessage } from './sdkIdleTimeout.js';
 import { TokenStore } from './tokenStore.js';
 
 const CATALOG_CACHE_TTL_MS = 5 * 60 * 1000;
 const FALLBACK_CACHE_TTL_MS = 5 * 1000;
 const USAGE_CACHE_TTL_MS = 30 * 1000;
+// Without host tools there is no VS Code approval boundary. Keep this path
+// text-only even if the SDK or local Qoder settings offer built-in tools.
+export const TEXT_ONLY_FALLBACK_TOOL_POLICY = {
+  tools: [] as string[],
+  permissionMode: 'default' as const,
+  settingSources: [] as [],
+  strictMcpConfig: true,
+  canUseTool: async () => ({
+    behavior: 'deny' as const,
+    message: 'Tool use requires VS Code Chat host tools.',
+  }),
+};
 const REFERENCE_CUE_PATTERN =
   /引用|选中|这段|文件|代码|内容|查看|看看|读取|评审|审查|分析|参考|修改|修复|实现|review|file|selection|attached/i;
 const CASUAL_PROMPT_PATTERN =
@@ -116,9 +129,15 @@ function activeEditorReferenceFor(
 function promptOptionsFor(
   messages: readonly vscode.LanguageModelChatRequestMessage[],
   maxInlineChars: number,
+  contextTokens: number,
 ) {
   return {
     maxInlineChars,
+    // A character budget below the token limit leaves room for the SDK's
+    // instructions, tool schemas, and non-ASCII tokenization variance.
+    maxPromptChars: Number.isFinite(contextTokens) && contextTokens > 0
+      ? Math.min(2_000_000, Math.floor(contextTokens * 0.75))
+      : undefined,
     activeEditorReference: activeEditorReferenceFor(messages),
   };
 }
@@ -380,6 +399,7 @@ export class QoderModelProvider
         pat,
         workspaceFolder.uri.fsPath,
         modelOptions,
+        model.maxInputTokens,
         config,
         messages,
         selectNativeTools(options.tools, config.maxNativeTools),
@@ -403,7 +423,11 @@ export class QoderModelProvider
       q = query({
         prompt: messagesToPrompt(
           messages,
-          promptOptionsFor(messages, config.maxInlineReferenceChars),
+          promptOptionsFor(
+            messages,
+            config.maxInlineReferenceChars,
+            Number(modelOptions.extraArgs?.['context-window'] ?? model.maxInputTokens),
+          ),
         ),
         options: {
           auth: accessToken(pat),
@@ -412,8 +436,7 @@ export class QoderModelProvider
           extraArgs: modelOptions.extraArgs
             ? { ...modelOptions.extraArgs }
             : undefined,
-          permissionMode: 'bypassPermissions',
-          allowDangerouslySkipPermissions: true,
+          ...TEXT_ONLY_FALLBACK_TOOL_POLICY,
           maxTurns: config.maxTurns,
           includePartialMessages: config.includePartialMessages,
           includeHookEvents: config.showActivity,
@@ -423,11 +446,31 @@ export class QoderModelProvider
 
       const cancellation = token.onCancellationRequested(() => {
         abortController.abort();
-        void q?.interrupt().catch(() => undefined);
       });
+      if (token.isCancellationRequested) {
+        abortController.abort();
+      }
 
       try {
-        for await (const message of q) {
+        const stream = q[Symbol.asyncIterator]();
+        while (true) {
+          const next = await waitForSdkMessage(
+            () => stream.next(),
+            config.sdkIdleTimeoutMs,
+            () => {
+              diagnostics.event('sdk_idle_timeout', {
+                status: 'error',
+                boundary: 'text_only',
+                timeoutMs: config.sdkIdleTimeoutMs,
+              });
+              abortController.abort();
+            },
+            abortController.signal,
+          );
+          if (next.done) {
+            break;
+          }
+          const message = next.value;
           if (activity) {
             for (const update of activity.consume(message)) {
               progress.report(new vscode.LanguageModelTextPart(update));
@@ -446,6 +489,8 @@ export class QoderModelProvider
             } else {
               executionError = resultError(message);
             }
+            // A result is terminal even if the SDK keeps the transport open.
+            break;
           }
         }
       } finally {
@@ -459,7 +504,19 @@ export class QoderModelProvider
         progress.report(new vscode.LanguageModelTextPart(finalText));
       }
     } finally {
-      await q?.close().catch(() => undefined);
+      if (q) {
+        let closeTimer: ReturnType<typeof setTimeout> | undefined;
+        try {
+          await Promise.race([
+            q.close().catch(() => undefined),
+            new Promise<void>((resolve) => {
+              closeTimer = setTimeout(resolve, 2_000);
+            }),
+          ]);
+        } finally {
+          if (closeTimer) clearTimeout(closeTimer);
+        }
+      }
     }
   }
 
@@ -484,6 +541,7 @@ export class QoderModelProvider
     pat: string,
     cwd: string,
     modelOptions: ReturnType<typeof buildModelQueryOptions>,
+    maxInputTokens: number,
     config: ReturnType<typeof readConfig>,
     messages: readonly vscode.LanguageModelChatRequestMessage[],
     nativeTools: readonly NativeToolDescriptor[],
@@ -498,13 +556,18 @@ export class QoderModelProvider
       extraArgs: modelOptions.extraArgs,
       maxTurns: config.maxTurns,
       nativeToolResultTimeoutMs: config.nativeToolResultTimeoutMs,
+      sdkIdleTimeoutMs: config.sdkIdleTimeoutMs,
       onClosed: (closedSession) => {
         this.removeNativeSession(closedSession);
       },
       diagnostics,
       prompt: messagesToPrompt(
         messages,
-        promptOptionsFor(messages, config.maxInlineReferenceChars),
+        promptOptionsFor(
+          messages,
+          config.maxInlineReferenceChars,
+          Number(modelOptions.extraArgs?.['context-window'] ?? maxInputTokens),
+        ),
       ),
       nativeTools,
     });
@@ -513,6 +576,10 @@ export class QoderModelProvider
       void session.cancel();
     });
     try {
+      if (token.isCancellationRequested) {
+        await session.cancel();
+        throw new Error('Qoder native tool request cancelled.');
+      }
       const boundary = await session.start(progress);
       this.trackNativeBoundary(session, boundary, progress, diagnostics);
       if (boundary.kind === 'done') {
@@ -549,6 +616,10 @@ export class QoderModelProvider
       void session.cancel();
     });
     try {
+      if (token.isCancellationRequested) {
+        await session.cancel();
+        throw new Error('Qoder native tool request cancelled.');
+      }
       const boundary = await session.continueWithToolResult(result, progress);
       this.removeNativeSession(session);
       this.trackNativeBoundary(session, boundary, progress, diagnostics);

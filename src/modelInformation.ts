@@ -41,8 +41,8 @@ export function descriptorToInformation(
     isUserSelectable: true,
     capabilities: {
       imageInput: descriptor.imageInput,
-      // Native mode delegates the read-only bridge tool to VS Code; the
-      // fallback path still uses Qoder's internal agent loop.
+      // Native mode delegates host tools to VS Code. Requests without host
+      // tools remain text-only.
       toolCalling: true,
     },
     detail: descriptor.detail,

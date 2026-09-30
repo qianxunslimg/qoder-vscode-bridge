@@ -11,6 +11,10 @@ import {
 
 export type QoderPromptInput = string | AsyncIterable<SDKUserMessage>;
 
+export interface PromptRenderOptions extends ReferenceRenderOptions {
+  readonly maxPromptChars?: number;
+}
+
 interface QoderImageContentBlock {
   readonly [key: string]: unknown;
   readonly type: 'image';
@@ -155,7 +159,7 @@ function messageToPromptEntry(
 
 export function messagesToPrompt(
   messages: readonly vscode.LanguageModelChatRequestMessage[],
-  options: ReferenceRenderOptions = {},
+  options: PromptRenderOptions = {},
 ): QoderPromptInput {
   const images: QoderImageContentBlock[] = [];
   const latestUserIndex = latestUserMessageIndex(messages);
@@ -168,6 +172,7 @@ export function messagesToPrompt(
         index === latestUserIndex,
       ),
     ),
+    options.maxPromptChars,
   )
     .map((entry) => `[${entry.label}]\n${entry.text}`)
     .join('\n\n');

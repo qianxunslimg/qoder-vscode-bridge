@@ -19,6 +19,7 @@ const GITHUB_REPOSITORY_URL =
 type SettingKey =
   | 'maxTurns'
   | 'nativeToolResultTimeoutMs'
+  | 'sdkIdleTimeoutMs'
   | 'showActivity'
   | 'nativeToolLoop'
   | 'debugLogging';
@@ -41,6 +42,7 @@ interface ControlCenterState {
     readonly modelOverrides: Readonly<Record<string, ModelOverride>>;
     readonly maxTurns: number;
     readonly nativeToolResultTimeoutMs: number;
+    readonly sdkIdleTimeoutMs: number;
     readonly showActivity: boolean;
     readonly nativeToolLoop: boolean;
     readonly debugLogging: boolean;
@@ -161,6 +163,7 @@ function formatTokens(value: number | undefined): string {
 export class QoderControlCenter implements vscode.Disposable {
   private panel: vscode.WebviewPanel | undefined;
   private latestState: ControlCenterState | undefined;
+  private usageRequestId = 0;
 
   public constructor(
     private readonly context: vscode.ExtensionContext,
@@ -187,6 +190,7 @@ export class QoderControlCenter implements vscode.Disposable {
     );
     this.panel.webview.html = this.html(this.panel.webview);
     this.panel.onDidDispose(() => {
+      this.usageRequestId += 1;
       this.panel = undefined;
       this.latestState = undefined;
     }, undefined, this.context.subscriptions);
@@ -199,6 +203,7 @@ export class QoderControlCenter implements vscode.Disposable {
   }
 
   public dispose(): void {
+    this.usageRequestId += 1;
     this.panel?.dispose();
     this.panel = undefined;
     this.latestState = undefined;
@@ -220,11 +225,13 @@ export class QoderControlCenter implements vscode.Disposable {
         void this.sendStateWithUsage({ refreshCatalog: false, forceUsage: true });
         return;
       case 'setPat':
+        this.usageRequestId += 1;
         await vscode.commands.executeCommand('qoderBridge.setPat');
         await this.sendState(false);
         void this.sendStateWithUsage({ refreshCatalog: true, forceUsage: true });
         return;
       case 'clearPat':
+        this.usageRequestId += 1;
         await vscode.commands.executeCommand('qoderBridge.clearPat');
         this.latestState = undefined;
         await this.sendState(false);
@@ -262,6 +269,7 @@ export class QoderControlCenter implements vscode.Disposable {
     const allowed: readonly SettingKey[] = [
       'maxTurns',
       'nativeToolResultTimeoutMs',
+      'sdkIdleTimeoutMs',
       'showActivity',
       'nativeToolLoop',
       'debugLogging',
@@ -294,6 +302,12 @@ export class QoderControlCenter implements vscode.Disposable {
         return number === undefined
           ? undefined
           : Math.max(5_000, Math.min(1_800_000, Math.round(number)));
+      }
+      case 'sdkIdleTimeoutMs': {
+        const number = numberValue(value);
+        return number === undefined
+          ? undefined
+          : Math.max(30_000, Math.min(1_800_000, Math.round(number)));
       }
       case 'showActivity':
       case 'nativeToolLoop':
@@ -373,6 +387,7 @@ export class QoderControlCenter implements vscode.Disposable {
         modelOverrides: config.modelOverrides,
         maxTurns: config.maxTurns,
         nativeToolResultTimeoutMs: config.nativeToolResultTimeoutMs,
+        sdkIdleTimeoutMs: config.sdkIdleTimeoutMs,
         showActivity: config.showActivity,
         nativeToolLoop: config.nativeToolLoop,
         debugLogging: config.debugLogging,
@@ -419,7 +434,12 @@ export class QoderControlCenter implements vscode.Disposable {
       return;
     }
 
+    const requestId = ++this.usageRequestId;
+    const isCurrent = () => Boolean(this.panel) && requestId === this.usageRequestId;
     const current = this.latestState ?? await this.state(false);
+    if (!isCurrent()) {
+      return;
+    }
     await this.postState({
       ...current,
       usageStatus: 'loading',
@@ -427,6 +447,9 @@ export class QoderControlCenter implements vscode.Disposable {
     });
 
     const pat = await this.tokenStore.get();
+    if (!isCurrent()) {
+      return;
+    }
     const cwd = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
     if (!pat || !cwd) {
       await this.postState({
@@ -439,22 +462,38 @@ export class QoderControlCenter implements vscode.Disposable {
       return;
     }
 
-    const statePromise = this.state(options.refreshCatalog);
-    const usagePromise = this.provider.fetchUsage(pat, cwd, {
-      force: options.forceUsage,
-    });
-    const [stateResult, usageResult] = await Promise.allSettled([
-      statePromise,
-      usagePromise,
-    ]);
-    const nextState = stateResult.status === 'fulfilled'
-      ? stateResult.value
-      : current;
-
-    if (usageResult.status === 'fulfilled') {
-      const usage = usageResult.value;
+    // Paint whichever request finishes first. A slow catalog refresh must not
+    // delay a completed usage response, and vice versa.
+    void this.state(options.refreshCatalog).then(async (nextState) => {
+      if (!isCurrent()) {
+        return;
+      }
+      const usageState = this.latestState ?? current;
       await this.postState({
         ...nextState,
+        usageStatus: usageState.usageStatus,
+        usageMessage: usageState.usageMessage,
+        usageUpdatedAt: usageState.usageUpdatedAt,
+        usage: usageState.usage,
+      });
+    }).catch(async (error: unknown) => {
+      if (isCurrent()) {
+        await this.panel?.webview.postMessage({
+          type: 'error',
+          message: error instanceof Error ? error.message : String(error),
+        });
+      }
+    });
+
+    try {
+      const usage = await this.provider.fetchUsage(pat, cwd, {
+        force: options.forceUsage,
+      });
+      if (!isCurrent()) {
+        return;
+      }
+      await this.postState({
+        ...(this.latestState ?? current),
         usageStatus: usage ? 'loaded' : 'unavailable',
         usageMessage: usage
           ? undefined
@@ -462,18 +501,18 @@ export class QoderControlCenter implements vscode.Disposable {
         usageUpdatedAt: usage ? Date.now() : current.usageUpdatedAt,
         usage: usage ? usageSnapshotFromInfo(usage) : current.usage,
       });
-      return;
+    } catch (error) {
+      if (!isCurrent()) {
+        return;
+      }
+      await this.postState({
+        ...(this.latestState ?? current),
+        usageStatus: 'error',
+        usageMessage: error instanceof Error ? error.message : String(error),
+        usage: current.usage,
+        usageUpdatedAt: current.usageUpdatedAt,
+      });
     }
-
-    await this.postState({
-      ...nextState,
-      usageStatus: 'error',
-      usageMessage: usageResult.reason instanceof Error
-        ? usageResult.reason.message
-        : String(usageResult.reason),
-      usage: current.usage,
-      usageUpdatedAt: current.usageUpdatedAt,
-    });
   }
 
   private html(webview: vscode.Webview): string {
@@ -700,6 +739,7 @@ export class QoderControlCenter implements vscode.Disposable {
           '<div class="settings">' +
             '<div class="setting"><label>最大轮数</label><input type="number" min="1" max="100" data-setting="maxTurns" value="' + config.maxTurns + '" /></div>' +
             '<div class="setting"><label>工具超时(ms)</label><input type="number" min="5000" max="1800000" step="1000" data-setting="nativeToolResultTimeoutMs" value="' + config.nativeToolResultTimeoutMs + '" /></div>' +
+            '<div class="setting"><label>模型无响应(ms)</label><input type="number" min="30000" max="1800000" step="1000" data-setting="sdkIdleTimeoutMs" value="' + config.sdkIdleTimeoutMs + '" /></div>' +
             '<div class="setting"><label>活动摘要</label><input type="checkbox" data-setting="showActivity" ' + (config.showActivity ? 'checked' : '') + ' /></div>' +
             '<div class="setting"><label>原生工具循环</label><input type="checkbox" data-setting="nativeToolLoop" ' + (config.nativeToolLoop ? 'checked' : '') + ' /></div>' +
             '<div class="setting"><label>调试日志</label><input type="checkbox" data-setting="debugLogging" ' + (config.debugLogging ? 'checked' : '') + ' /></div>' +

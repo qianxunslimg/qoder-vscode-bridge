@@ -57,6 +57,32 @@ test('keeps the newest conversation entries when the prompt exceeds the budget',
   assert.ok(text.length <= 120);
 });
 
+test('preserves the beginning and end of an oversized current request', () => {
+  const instruction = 'USER_REQUEST_AT_START: fix the parser';
+  const attachmentEnd = 'REFERENCE_END: expected output';
+  const compacted = compactPromptEntries([
+    { label: 'user', text: `${instruction}\n${'x'.repeat(50_000)}\n${attachmentEnd}` },
+  ]);
+  const text = compacted.map((entry) => entry.text).join('\n');
+
+  assert.match(text, /USER_REQUEST_AT_START: fix the parser/);
+  assert.match(text, /REFERENCE_END: expected output/);
+  assert.match(text, /Middle of latest message omitted/);
+  assert.ok(compacted.reduce((sum, entry) => sum + entry.label.length + entry.text.length + 4, 0) <= 48_000);
+});
+
+test('never exceeds a tiny prompt budget when truncating the latest entry', () => {
+  for (const budget of [1, 4, 7, 8, 20, 40]) {
+    const compacted = compactPromptEntries([
+      { label: 'user', text: 'ABCDEFGHIJ'.repeat(10) },
+    ], budget);
+    assert.ok(
+      compacted.reduce((sum, entry) => sum + entry.label.length + entry.text.length + 4, 0) <= budget,
+      `budget ${budget}`,
+    );
+  }
+});
+
 test('bounds old assistant activity while preserving its final summary', () => {
   const compacted = compactPromptEntries([
     {

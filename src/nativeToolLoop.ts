@@ -17,6 +17,10 @@ import {
   errorMetadata,
   textLength,
 } from './diagnostics.js';
+import {
+  DEFAULT_SDK_IDLE_TIMEOUT_MS,
+  waitForSdkMessage,
+} from './sdkIdleTimeout.js';
 
 export const QODER_READ_FILE_TOOL_NAME = 'qoder_read_file';
 const QODER_MCP_SERVER_NAME = 'qoder-vscode-bridge';
@@ -70,6 +74,7 @@ interface NativeSessionOptions {
   readonly extraArgs?: Readonly<Record<string, string | null>>;
   readonly maxTurns: number;
   readonly nativeToolResultTimeoutMs?: number;
+  readonly sdkIdleTimeoutMs?: number;
   readonly onClosed?: (session: NativeQoderSession) => void;
   readonly diagnostics?: BridgeDiagnostics;
   readonly prompt: QoderPromptInput;
@@ -132,24 +137,31 @@ class AsyncQueue<T> {
   private closed = false;
   private closeError: unknown;
 
-  public push(value: T): void {
+  public push(value: T): boolean {
     if (this.closed) {
-      return;
+      return false;
     }
     const waiter = this.waiters.shift();
     if (waiter) {
       waiter.resolve(value);
-      return;
+      return true;
     }
     this.values.push(value);
+    return true;
   }
 
-  public close(error?: unknown): void {
+  public close(error?: unknown, onQueued?: (value: T) => void): void {
     if (this.closed) {
       return;
     }
     this.closed = true;
     this.closeError = error;
+    while (this.values.length > 0) {
+      const value = this.values.shift();
+      if (value !== undefined) {
+        onQueued?.(value);
+      }
+    }
     while (this.waiters.length > 0) {
       const waiter = this.waiters.shift();
       if (!waiter) {
@@ -192,6 +204,44 @@ function textValue(value: unknown): string | undefined {
 
 function arrayValue(value: unknown): unknown[] | undefined {
   return Array.isArray(value) ? value : undefined;
+}
+
+function sameToolInput(left: unknown, right: unknown): boolean {
+  if (Object.is(left, right)) {
+    return true;
+  }
+  if (Array.isArray(left) || Array.isArray(right)) {
+    return Array.isArray(left) && Array.isArray(right) &&
+      left.length === right.length &&
+      left.every((value, index) => sameToolInput(value, right[index]));
+  }
+  const leftObject = objectValue(left);
+  const rightObject = objectValue(right);
+  if (!leftObject || !rightObject) {
+    return false;
+  }
+  const leftKeys = Object.keys(leftObject);
+  const rightKeys = Object.keys(rightObject);
+  return leftKeys.length === rightKeys.length &&
+    leftKeys.every((key) =>
+      Object.prototype.hasOwnProperty.call(rightObject, key) &&
+      sameToolInput(leftObject[key], rightObject[key]));
+}
+
+function parsedProxyInput(
+  proxy: NativeToolDescriptor,
+  input: Record<string, unknown>,
+): Record<string, unknown> {
+  if (!proxy.inputSchema) {
+    return normalizeNativeToolInput(proxy.name, input);
+  }
+  // The MCP server validates with this same Zod shape, which strips unknown
+  // object properties before the callback receives its input.
+  const parsed = z.object(nativeToolInputShape(proxy.inputSchema)).safeParse(input);
+  return normalizeNativeToolInput(
+    proxy.name,
+    parsed.success ? parsed.data as Record<string, unknown> : input,
+  );
 }
 
 function proxyNameFor(toolName: string, index: number): string {
@@ -371,11 +421,12 @@ function contentParts(value: unknown): JsonObject[] {
     .filter((part): part is JsonObject => part !== undefined);
 }
 
-function messageToolCall(message: SDKMessage): NativeToolInvocation | undefined {
+function messageToolCalls(message: SDKMessage): NativeToolInvocation[] {
   if (message.type !== 'assistant') {
-    return undefined;
+    return [];
   }
 
+  const calls: NativeToolInvocation[] = [];
   for (const part of contentParts(message.message)) {
     if (textValue(part.type) !== 'tool_use') {
       continue;
@@ -386,9 +437,9 @@ function messageToolCall(message: SDKMessage): NativeToolInvocation | undefined 
     if (!callId || !name || !input) {
       continue;
     }
-    return { callId, name, input };
+    calls.push({ callId, name, input });
   }
-  return undefined;
+  return calls;
 }
 
 function textDelta(message: SDKMessage): string | undefined {
@@ -534,8 +585,8 @@ export function isNativeToolCallId(callId: string): boolean {
 
 /**
  * A real Agent request supplies the host tools to the provider. Proxy all of
- * them through the same native boundary; an empty tool list still uses the
- * legacy Qoder loop for ordinary text-only chat.
+ * them through the same native boundary; an empty tool list uses the
+ * SDK's text-only path.
  */
 export function hasNativeToolLoopTools(
   tools: readonly vscode.LanguageModelChatTool[] | undefined,
@@ -556,18 +607,21 @@ export class NativeQoderSession {
   private readonly q: Query;
   private readonly messages = new AsyncQueue<SDKMessage>();
   private readonly proxyRequests = new Map<string, AsyncQueue<ProxyRequest>>();
+  private readonly unmatchedProxyRequests = new Map<string, ProxyRequest[]>();
   private readonly proxyTools = new Map<
     string,
     NativeToolDescriptor & { readonly proxyName: string }
   >();
   private readonly pendingCalls = new Map<string, PendingCall>();
   private readonly seenToolCalls = new Set<string>();
+  private readonly queuedToolCalls: NativeToolInvocation[] = [];
   private readonly abortController = new AbortController();
   private readonly pumpPromise: Promise<void>;
   private readonly onClosed?: (session: NativeQoderSession) => void;
   private readonly diagnostics?: BridgeDiagnostics;
   private closed = false;
   private readonly nativeToolResultTimeoutMs: number;
+  private readonly sdkIdleTimeoutMs: number;
 
   public get sessionId(): string {
     return this.nativeSessionId;
@@ -581,6 +635,13 @@ export class NativeQoderSession {
       configuredTimeout > 0
         ? configuredTimeout
         : 300_000;
+    const configuredIdleTimeout = options.sdkIdleTimeoutMs;
+    this.sdkIdleTimeoutMs =
+      typeof configuredIdleTimeout === 'number' &&
+      Number.isFinite(configuredIdleTimeout) &&
+      configuredIdleTimeout > 0
+        ? configuredIdleTimeout
+        : DEFAULT_SDK_IDLE_TIMEOUT_MS;
     this.onClosed = options.onClosed;
     this.diagnostics = options.diagnostics;
     const proxyTools = options.nativeTools.map((descriptor, index) => ({
@@ -625,7 +686,9 @@ export class NativeQoderSession {
               ),
               result,
             };
-            queue.push(request);
+            if (!queue.push(request)) {
+              result.reject(new Error('Qoder native tool session is closed.'));
+            }
             this.log('proxy_queued', {
               proxy: descriptor.proxyName,
               tool: descriptor.name,
@@ -660,6 +723,11 @@ export class NativeQoderSession {
         includePartialMessages: true,
         tools: proxyTools.map((descriptor) => descriptor.proxyName),
         mcpServers: { [QODER_MCP_SERVER_NAME]: server },
+        // Only the MCP server created for this request may supply tools.
+        // Workspace/user Qoder MCP settings must not bypass Chat approval.
+        settingSources: [],
+        strictMcpConfig: true,
+        allowedMcpServerNames: [QODER_MCP_SERVER_NAME],
         abortController: this.abortController,
       },
     });
@@ -669,6 +737,7 @@ export class NativeQoderSession {
       model: options.model,
       toolCount: proxyTools.length,
       timeoutMs: this.nativeToolResultTimeoutMs,
+      sdkIdleTimeoutMs: this.sdkIdleTimeoutMs,
     });
   }
 
@@ -720,13 +789,9 @@ export class NativeQoderSession {
     const error = new Error(reason);
     this.rejectPendingCalls(error);
     this.messages.close(error);
-    for (const queue of this.proxyRequests.values()) {
-      queue.close(error);
-    }
+    this.rejectQueuedProxyRequests(error);
     this.abortController.abort();
-    await this.q.interrupt().catch(() => undefined);
-    await this.q.close().catch(() => undefined);
-    await this.pumpPromise.catch(() => undefined);
+    this.closeSdk();
   }
 
   public async close(): Promise<void> {
@@ -739,12 +804,9 @@ export class NativeQoderSession {
     const error = new Error('Qoder native tool session closed.');
     this.rejectPendingCalls(error);
     this.messages.close();
-    for (const queue of this.proxyRequests.values()) {
-      queue.close(error);
-    }
+    this.rejectQueuedProxyRequests(error);
     this.abortController.abort();
-    await this.q.close().catch(() => undefined);
-    await this.pumpPromise.catch(() => undefined);
+    this.closeSdk();
   }
 
   private async pump(): Promise<void> {
@@ -763,7 +825,12 @@ export class NativeQoderSession {
   ): Promise<NativeSessionBoundary> {
     let streamedText = false;
     while (true) {
-      const message = await this.messages.next();
+      const queued = this.queuedToolCalls.shift();
+      if (queued) {
+        return this.dispatchToolCall(queued);
+      }
+
+      const message = await this.waitForSdkMessage();
       if (!message) {
         throw new Error('Qoder native tool session ended before returning a result.');
       }
@@ -774,56 +841,14 @@ export class NativeQoderSession {
         progress.report(new vscode.LanguageModelTextPart(delta));
       }
 
-      const qoderInvocation = messageToolCall(message);
-      if (
-        qoderInvocation &&
-        !this.seenToolCalls.has(qoderInvocation.callId)
-      ) {
-        const proxy = this.proxyTools.get(qoderInvocation.name);
-        if (!proxy) {
-          throw new Error(
-            `Qoder requested unsupported native proxy ${qoderInvocation.name}.`,
-          );
+      for (const call of messageToolCalls(message)) {
+        if (!this.seenToolCalls.has(call.callId)) {
+          this.seenToolCalls.add(call.callId);
+          this.queuedToolCalls.push(call);
         }
-        this.seenToolCalls.add(qoderInvocation.callId);
-        this.log('tool_requested', {
-          callId: qoderInvocation.callId,
-          proxy: proxy.proxyName,
-          tool: proxy.name,
-          status: 'requested',
-        });
-        const queue = this.proxyRequests.get(proxy.proxyName);
-        if (!queue) {
-          throw new Error(`Missing native proxy queue for ${proxy.proxyName}.`);
-        }
-        const proxyRequest = await this.waitForProxyRequest(
-          queue,
-          proxy.proxyName,
-        );
-        if (!proxyRequest) {
-          throw new Error(
-            `Qoder requested ${proxy.proxyName} without a proxy request.`,
-          );
-        }
-        const invocation = {
-          name: proxy.name,
-          callId: `${NATIVE_CALL_ID_PREFIX}${qoderInvocation.callId}`,
-          input: proxyRequest.input,
-        };
-        this.pendingCalls.set(invocation.callId, {
-          ...proxyRequest,
-          timeout: this.startPendingCallWatchdog(
-            invocation.callId,
-            invocation.name,
-          ),
-        });
-        this.log('proxy_dispatched', {
-          callId: invocation.callId,
-          proxy: proxy.proxyName,
-          tool: proxy.name,
-          status: 'dispatched',
-        });
-        return { kind: 'tool_call', invocation };
+      }
+      if (this.queuedToolCalls.length > 0) {
+        continue;
       }
 
       if (message.type === 'result') {
@@ -837,6 +862,52 @@ export class NativeQoderSession {
         return { kind: 'done' };
       }
     }
+  }
+
+  private async dispatchToolCall(
+    qoderInvocation: NativeToolInvocation,
+  ): Promise<NativeSessionBoundary> {
+    const proxy = this.proxyTools.get(qoderInvocation.name);
+    if (!proxy) {
+      throw new Error(
+        `Qoder requested unsupported native proxy ${qoderInvocation.name}.`,
+      );
+    }
+    this.log('tool_requested', {
+      callId: qoderInvocation.callId,
+      proxy: proxy.proxyName,
+      tool: proxy.name,
+      status: 'requested',
+    });
+    const queue = this.proxyRequests.get(proxy.proxyName);
+    if (!queue) {
+      throw new Error(`Missing native proxy queue for ${proxy.proxyName}.`);
+    }
+    const proxyRequest = await this.waitForProxyRequest(
+      queue,
+      proxy.proxyName,
+      parsedProxyInput(proxy, qoderInvocation.input),
+      this.queuedToolCalls.some((call) => call.name === proxy.proxyName),
+    );
+    if (!proxyRequest) {
+      throw new Error(`Qoder requested ${proxy.proxyName} without a proxy request.`);
+    }
+    const invocation = {
+      name: proxy.name,
+      callId: `${NATIVE_CALL_ID_PREFIX}${qoderInvocation.callId}`,
+      input: proxyRequest.input,
+    };
+    this.pendingCalls.set(invocation.callId, {
+      ...proxyRequest,
+      timeout: this.startPendingCallWatchdog(invocation.callId, invocation.name),
+    });
+    this.log('proxy_dispatched', {
+      callId: invocation.callId,
+      proxy: proxy.proxyName,
+      tool: proxy.name,
+      status: 'dispatched',
+    });
+    return { kind: 'tool_call', invocation };
   }
 
   private clearPendingCall(callId: string): PendingCall | undefined {
@@ -855,6 +926,18 @@ export class NativeQoderSession {
       clearTimeout(pending.timeout);
       pending.result.reject(error);
     }
+  }
+
+  private rejectQueuedProxyRequests(error: Error): void {
+    for (const queue of this.proxyRequests.values()) {
+      queue.close(error, (request) => request.result.reject(error));
+    }
+    for (const requests of this.unmatchedProxyRequests?.values() ?? []) {
+      for (const request of requests) {
+        request.result.reject(error);
+      }
+    }
+    this.unmatchedProxyRequests?.clear();
   }
 
   private startPendingCallWatchdog(
@@ -883,28 +966,88 @@ export class NativeQoderSession {
   private async waitForProxyRequest(
     queue: AsyncQueue<ProxyRequest>,
     proxyName: string,
+    expectedInput: Record<string, unknown>,
+    hasOtherSameProxyCalls: boolean,
   ): Promise<ProxyRequest | undefined> {
+    const unmatched = this.unmatchedProxyRequests?.get(proxyName);
+    const matchedIndex = unmatched?.findIndex((request) =>
+      sameToolInput(request.input, expectedInput)) ?? -1;
+    if (unmatched && matchedIndex >= 0) {
+      return unmatched.splice(matchedIndex, 1)[0];
+    }
+    if (!hasOtherSameProxyCalls && unmatched?.length) {
+      const error = new Error(`Qoder native proxy "${proxyName}" returned arguments that do not match the pending tool call.`);
+      for (const request of unmatched) {
+        request.result.reject(error);
+      }
+      unmatched.length = 0;
+      throw error;
+    }
+
+    const handshakeTimeoutMs = this.sdkIdleTimeoutMs ?? DEFAULT_SDK_IDLE_TIMEOUT_MS;
     let timeout: ReturnType<typeof setTimeout> | undefined;
     const timeoutPromise = new Promise<never>((_, reject) => {
       timeout = setTimeout(() => {
-        const error = this.nativeToolTimeoutError(proxyName);
+        const seconds = Math.ceil(handshakeTimeoutMs / 1000);
+        const error = new Error(
+          `Qoder SDK did not dispatch native proxy "${proxyName}" within ${seconds} ${seconds === 1 ? 'second' : 'seconds'}. ` +
+          'The MCP callback may be missing; retry the request. ' +
+          'Increase qoderBridge.sdkIdleTimeoutMs if needed.',
+        );
         this.log('proxy_timeout', {
           proxy: proxyName,
           status: 'timeout',
-          timeoutMs: this.nativeToolResultTimeoutMs,
+          timeoutMs: handshakeTimeoutMs,
           ...errorMetadata(error),
         });
-        void this.cancel(error.message).catch(() => undefined);
         reject(error);
-      }, this.nativeToolResultTimeoutMs);
+        void this.cancel(error.message).catch(() => undefined);
+      }, handshakeTimeoutMs);
     });
     try {
-      return await Promise.race([queue.next(), timeoutPromise]);
+      const matchingRequest = (async (): Promise<ProxyRequest | undefined> => {
+        while (true) {
+          const request = await queue.next();
+          if (!request || sameToolInput(request.input, expectedInput)) {
+            return request;
+          }
+          if (!hasOtherSameProxyCalls) {
+            const error = new Error(`Qoder native proxy "${proxyName}" returned arguments that do not match the pending tool call.`);
+            request.result.reject(error);
+            throw error;
+          }
+          const skipped = this.unmatchedProxyRequests?.get(proxyName) ?? [];
+          skipped.push(request);
+          this.unmatchedProxyRequests?.set(proxyName, skipped);
+          this.log('proxy_input_deferred', {
+            proxy: proxyName,
+            status: 'deferred',
+            inputKeyCount: Object.keys(request.input).length,
+          });
+        }
+      })();
+      return await Promise.race([matchingRequest, timeoutPromise]);
     } finally {
       if (timeout) {
         clearTimeout(timeout);
       }
     }
+  }
+
+  private async waitForSdkMessage(): Promise<SDKMessage | undefined> {
+    return waitForSdkMessage(
+      () => this.messages.next(),
+      this.sdkIdleTimeoutMs,
+      (error) => {
+        this.log('sdk_idle_timeout', {
+          status: 'timeout',
+          timeoutMs: this.sdkIdleTimeoutMs,
+          ...errorMetadata(error),
+        });
+        void this.cancel(error.message).catch(() => undefined);
+      },
+      this.abortController?.signal,
+    );
   }
 
   private nativeToolTimeoutError(toolName: string): Error {
@@ -914,6 +1057,18 @@ export class NativeQoderSession {
       'VS Code may have interrupted the tool call; cancel the request and retry. ' +
       'Increase qoderBridge.nativeToolResultTimeoutMs for long-running tools.',
     );
+  }
+
+  private closeSdk(): void {
+    // Aborting and closing the bridge queues above is synchronous. SDK
+    // interrupt/close may wait on a missing control response or a stuck MCP
+    // transport; never hold the VS Code response open for that cleanup.
+    try {
+      void this.q.close().catch(() => undefined);
+    } catch {
+      // Cleanup must not replace the original result or cancellation error.
+    }
+    void this.pumpPromise?.catch(() => undefined);
   }
 
   private notifyClosed(): void {
