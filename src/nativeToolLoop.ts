@@ -12,6 +12,7 @@ import {
 import { z } from 'zod';
 import type { QoderPromptInput } from './messageAdapter.js';
 import type { NativeToolDescriptor } from './nativeToolPolicy.js';
+import { imageDataFromUnknown } from './referenceAdapter.js';
 import {
   BridgeDiagnostics,
   errorMetadata,
@@ -33,7 +34,12 @@ export interface NativeToolResult {
   readonly callId: string;
   readonly text: string;
   readonly isError: boolean;
+  readonly content?: NativeToolContent[];
 }
+
+type NativeToolContent =
+  | { readonly type: 'text'; readonly text: string }
+  | { readonly type: 'image'; readonly mimeType: string; readonly data: string };
 
 export interface NativeToolInvocation {
   readonly callId: string;
@@ -63,7 +69,7 @@ interface PendingCall extends ProxyRequest {
 
 interface CallToolResult {
   readonly [key: string]: unknown;
-  readonly content: Array<{ readonly type: 'text'; readonly text: string }>;
+  readonly content: NativeToolContent[];
   readonly isError?: boolean;
 }
 
@@ -150,18 +156,10 @@ class AsyncQueue<T> {
     return true;
   }
 
-  public close(error?: unknown, onQueued?: (value: T) => void): void {
-    if (this.closed) {
-      return;
-    }
+  public end(error?: unknown): void {
+    if (this.closed) return;
     this.closed = true;
     this.closeError = error;
-    while (this.values.length > 0) {
-      const value = this.values.shift();
-      if (value !== undefined) {
-        onQueued?.(value);
-      }
-    }
     while (this.waiters.length > 0) {
       const waiter = this.waiters.shift();
       if (!waiter) {
@@ -171,6 +169,17 @@ class AsyncQueue<T> {
         waiter.reject(error);
       } else {
         waiter.resolve(undefined);
+      }
+    }
+  }
+
+  public close(error?: unknown, onQueued?: (value: T) => void): void {
+    this.closeError = error;
+    this.end(error);
+    while (this.values.length > 0) {
+      const value = this.values.shift();
+      if (value !== undefined) {
+        onQueued?.(value);
       }
     }
   }
@@ -474,23 +483,31 @@ function cancellationReasonCode(reason: string): string {
   return 'error';
 }
 
-function resultText(message: vscode.LanguageModelToolResultPart): string {
-  return message.content
-    .map((item) => {
-      if (item instanceof vscode.LanguageModelTextPart) {
-        return item.value;
-      }
-      const object = objectValue(item);
-      if (typeof object?.text === 'string') {
-        return object.text;
-      }
-      try {
-        return JSON.stringify(item);
-      } catch {
-        return String(item);
-      }
-    })
-    .join('');
+function resultContent(message: vscode.LanguageModelToolResultPart): NativeToolContent[] {
+  return message.content.map((item): NativeToolContent => {
+    const image = imageDataFromUnknown(item);
+    if (image) {
+      return {
+        type: 'image',
+        mimeType: image.mimeType,
+        data: typeof image.data === 'string'
+          ? image.data
+          : Buffer.from(image.data).toString('base64'),
+      };
+    }
+    if (item instanceof vscode.LanguageModelTextPart) {
+      return { type: 'text', text: item.value };
+    }
+    const object = objectValue(item);
+    if (typeof object?.text === 'string') {
+      return { type: 'text', text: object.text };
+    }
+    try {
+      return { type: 'text', text: JSON.stringify(item) ?? '' };
+    } catch {
+      return { type: 'text', text: String(item) };
+    }
+  });
 }
 
 function resultIsError(message: vscode.LanguageModelToolResultPart): boolean {
@@ -518,10 +535,12 @@ export function latestNativeToolResult(
     if (!part.callId.startsWith(NATIVE_CALL_ID_PREFIX)) {
       continue;
     }
+    const content = resultContent(part);
     return {
       callId: part.callId,
-      text: resultText(part),
+      text: content.filter((item) => item.type === 'text').map((item) => item.text).join(''),
       isError: resultIsError(part),
+      ...(content.some((item) => item.type === 'image') ? { content } : {}),
     };
   }
   return undefined;
@@ -770,7 +789,9 @@ export class NativeQoderSession {
       );
     }
     pending.result.resolve({
-      content: [{ type: 'text', text: result.text || '(empty tool result)' }],
+      content: result.content?.length
+        ? result.content
+        : [{ type: 'text', text: result.text || '(empty tool result)' }],
       isError: result.isError,
     });
     return this.consumeUntilBoundary(progress);
@@ -814,9 +835,9 @@ export class NativeQoderSession {
       for await (const message of this.q) {
         this.messages.push(message);
       }
-      this.messages.close();
+      this.messages.end();
     } catch (error) {
-      this.messages.close(error);
+      this.messages.end(error);
     }
   }
 

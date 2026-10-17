@@ -212,6 +212,9 @@ export class QoderModelProvider
   private cachedLoadedFromQoder = false;
   private cacheExpiresAt = 0;
   private inFlight: Promise<CatalogLoadResult> | undefined;
+  private metadataKey: string | undefined;
+  private metadataGeneration = 0;
+  private disposed = false;
   private readonly metadataSession = new QoderMetadataSession();
   private usageCache: UsageCacheEntry | undefined;
   private usageInFlight:
@@ -263,6 +266,10 @@ export class QoderModelProvider
     options: { readonly force?: boolean } = {},
   ): Promise<UsageInfo | null> {
     const key = `${cwd}\u0000${pat}`;
+    const currentPat = await this.tokenStore.get();
+    if (this.disposed || pat !== currentPat) return null;
+    this.selectMetadataAccount(key);
+    const generation = this.metadataGeneration;
     const force = options.force === true;
     const cached = this.usageCache;
     if (
@@ -277,17 +284,18 @@ export class QoderModelProvider
       return this.usageInFlight.promise;
     }
 
-    const promise = this.metadataSession.getUsageInfo(pat, cwd);
+    const promise = this.metadataSession.getUsageInfo(pat, cwd)
+      .then(async (usage) => {
+        const currentPat = await this.tokenStore.get();
+        if (this.disposed || generation !== this.metadataGeneration || pat !== currentPat) return null;
+        this.usageCache = { key, usage, fetchedAt: Date.now() };
+        return usage;
+      })
+      .finally(() => {
+        if (this.usageInFlight?.promise === promise) this.usageInFlight = undefined;
+      });
     this.usageInFlight = { key, promise };
-    try {
-      const usage = await promise;
-      this.usageCache = { key, usage, fetchedAt: Date.now() };
-      return usage;
-    } finally {
-      if (this.usageInFlight?.promise === promise) {
-        this.usageInFlight = undefined;
-      }
-    }
+    return promise;
   }
 
   public async provideLanguageModelChatResponse(
@@ -529,6 +537,10 @@ export class QoderModelProvider
   }
 
   public dispose(): void {
+    this.disposed = true;
+    this.metadataGeneration += 1;
+    this.cachedModels = undefined;
+    this.usageCache = undefined;
     this.changeEmitter.dispose();
     void this.metadataSession.close();
     for (const tracked of this.nativeSessions.values()) {
@@ -680,6 +692,13 @@ export class QoderModelProvider
     force: boolean,
     allowNetwork = true,
   ): Promise<CatalogLoadResult> {
+    const pat = await this.tokenStore.get();
+    const cwd = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+    this.selectMetadataAccount(pat && cwd ? `${cwd}\u0000${pat}` : undefined);
+    const generation = this.metadataGeneration;
+    if (this.disposed || !pat || !cwd) {
+      return { models: deduplicateModels(fallbackModelDescriptors()), loadedFromQoder: false };
+    }
     const now = Date.now();
     if (!force && this.cachedModels && now < this.cacheExpiresAt) {
       return {
@@ -699,8 +718,13 @@ export class QoderModelProvider
       return this.inFlight;
     }
 
-    this.inFlight = this.loadModels()
-      .then((result) => {
+    const promise = this.loadModels(pat, cwd)
+      .then(async (result) => {
+        const currentPat = await this.tokenStore.get();
+        if (this.disposed || generation !== this.metadataGeneration ||
+            pat !== currentPat) {
+          return this.getModels(false, false);
+        }
         this.cachedModels = result.models;
         this.cachedLoadedFromQoder = result.loadedFromQoder;
         this.cacheExpiresAt =
@@ -711,27 +735,30 @@ export class QoderModelProvider
         return result;
       })
       .finally(() => {
-        this.inFlight = undefined;
+        if (this.inFlight === promise) this.inFlight = undefined;
       });
-
-    return this.inFlight;
+    this.inFlight = promise;
+    return promise;
   }
 
-  private async loadModels(): Promise<CatalogLoadResult> {
-    const pat = await this.tokenStore.get();
-    const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
-    if (!pat || !workspaceFolder) {
-      await this.metadataSession.close();
-      return {
-        models: deduplicateModels(fallbackModelDescriptors()),
-        loadedFromQoder: false,
-      };
-    }
+  private selectMetadataAccount(key: string | undefined): void {
+    if (key === this.metadataKey) return;
+    this.metadataKey = key;
+    this.metadataGeneration += 1;
+    this.cachedModels = undefined;
+    this.cachedLoadedFromQoder = false;
+    this.cacheExpiresAt = 0;
+    this.inFlight = undefined;
+    this.usageCache = undefined;
+    this.usageInFlight = undefined;
+    void this.metadataSession.close();
+  }
 
+  private async loadModels(pat: string, cwd: string): Promise<CatalogLoadResult> {
     try {
       const catalog = await this.metadataSession.getAvailableModels(
         pat,
-        workspaceFolder.uri.fsPath,
+        cwd,
       );
       const models = deduplicateModels(catalogToDescriptors(catalog));
       if (models.length > 0) {

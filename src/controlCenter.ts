@@ -36,6 +36,8 @@ interface ControlCenterState {
   readonly patConfigured: boolean;
   readonly workspace: string | undefined;
   readonly loadedFromQoder: boolean;
+  readonly catalogStatus: 'idle' | 'loading' | 'loaded' | 'error';
+  readonly catalogMessage?: string;
   readonly refreshedAt: number;
   readonly models: readonly ModelSnapshot[];
   readonly config: {
@@ -164,6 +166,10 @@ export class QoderControlCenter implements vscode.Disposable {
   private panel: vscode.WebviewPanel | undefined;
   private latestState: ControlCenterState | undefined;
   private usageRequestId = 0;
+  private catalogRequestId = 0;
+  private catalogStatus: ControlCenterState['catalogStatus'] = 'idle';
+  private catalogMessage: string | undefined;
+  private settingUpdates: Promise<void> = Promise.resolve();
 
   public constructor(
     private readonly context: vscode.ExtensionContext,
@@ -188,9 +194,16 @@ export class QoderControlCenter implements vscode.Disposable {
         localResourceRoots: [],
       },
     );
+    this.panel.iconPath = {
+      light: vscode.Uri.joinPath(this.context.extensionUri, 'media', 'bridge-light.svg'),
+      dark: vscode.Uri.joinPath(this.context.extensionUri, 'media', 'bridge-dark.svg'),
+    };
     this.panel.webview.html = this.html(this.panel.webview);
     this.panel.onDidDispose(() => {
       this.usageRequestId += 1;
+      this.catalogRequestId += 1;
+      this.catalogStatus = 'idle';
+      this.catalogMessage = undefined;
       this.panel = undefined;
       this.latestState = undefined;
     }, undefined, this.context.subscriptions);
@@ -204,6 +217,7 @@ export class QoderControlCenter implements vscode.Disposable {
 
   public dispose(): void {
     this.usageRequestId += 1;
+    this.catalogRequestId += 1;
     this.panel?.dispose();
     this.panel = undefined;
     this.latestState = undefined;
@@ -218,20 +232,26 @@ export class QoderControlCenter implements vscode.Disposable {
         void this.sendStateWithUsage({ refreshCatalog: true, forceUsage: false });
         return;
       case 'refreshModels':
-        await this.provider.refreshModels();
-        await this.sendState(false);
+        await this.refreshCatalog(true);
         return;
       case 'refreshUsage':
         void this.sendStateWithUsage({ refreshCatalog: false, forceUsage: true });
         return;
       case 'setPat':
         this.usageRequestId += 1;
+        this.catalogRequestId += 1;
+        this.catalogStatus = 'idle';
+        this.catalogMessage = undefined;
         await vscode.commands.executeCommand('qoderBridge.setPat');
+        this.latestState = undefined;
         await this.sendState(false);
         void this.sendStateWithUsage({ refreshCatalog: true, forceUsage: true });
         return;
       case 'clearPat':
         this.usageRequestId += 1;
+        this.catalogRequestId += 1;
+        this.catalogStatus = 'idle';
+        this.catalogMessage = undefined;
         await vscode.commands.executeCommand('qoderBridge.clearPat');
         this.latestState = undefined;
         await this.sendState(false);
@@ -246,19 +266,32 @@ export class QoderControlCenter implements vscode.Disposable {
         await vscode.env.openExternal(vscode.Uri.parse(GITHUB_REPOSITORY_URL));
         return;
       case 'setSetting':
-        await this.updateSetting(message.key, message.value);
-        await this.sendState(false);
+        await this.saveSetting(() => this.updateSetting(message.key, message.value));
         return;
       case 'setModelSetting':
-        await this.updateModelSetting(
+        await this.saveSetting(() => this.updateModelSetting(
           message.modelId,
           message.key,
           message.value,
-        );
-        await this.sendState(false);
+        ));
         return;
       default:
         return;
+    }
+  }
+
+  private async saveSetting(update: () => Promise<void>): Promise<void> {
+    const pending = this.settingUpdates.then(update);
+    this.settingUpdates = pending.catch(() => undefined);
+    try {
+      await pending;
+      await this.sendState(false);
+      await this.panel?.webview.postMessage({ type: 'saved' });
+    } catch (error) {
+      await this.panel?.webview.postMessage({
+        type: 'error',
+        message: `保存失败：${error instanceof Error ? error.message : String(error)}`,
+      });
     }
   }
 
@@ -338,7 +371,9 @@ export class QoderControlCenter implements vscode.Disposable {
     ) {
       delete current[key as keyof ModelOverride];
     } else if (key === 'contextWindow') {
-      const contextWindow = numberValue(value);
+      const contextWindow = numberValue(
+        typeof value === 'string' && /^\d+$/.test(value) ? Number(value) : value,
+      );
       if (contextWindow === undefined || contextWindow <= 0) {
         return;
       }
@@ -379,6 +414,8 @@ export class QoderControlCenter implements vscode.Disposable {
       patConfigured: Boolean(await this.tokenStore.get()),
       workspace,
       loadedFromQoder: snapshot.loadedFromQoder,
+      catalogStatus: this.catalogStatus,
+      catalogMessage: this.catalogMessage,
       refreshedAt: snapshot.refreshedAt,
       models: snapshot.models.map((model) =>
         modelSnapshot(model, config.modelOverrides[model.id]),
@@ -408,8 +445,10 @@ export class QoderControlCenter implements vscode.Disposable {
     if (!this.panel) {
       return;
     }
+    const requestId = this.catalogRequestId;
     try {
       const next = await this.state(allowNetwork);
+      if (requestId !== this.catalogRequestId || !this.panel) return;
       const previous = this.latestState;
       await this.postState({
         ...next,
@@ -419,10 +458,47 @@ export class QoderControlCenter implements vscode.Disposable {
         usage: previous?.usage,
       });
     } catch (error) {
+      if (requestId !== this.catalogRequestId || !this.panel) return;
       await this.panel.webview.postMessage({
         type: 'error',
         message: error instanceof Error ? error.message : String(error),
       });
+    }
+  }
+
+  private async refreshCatalog(force: boolean): Promise<void> {
+    if (!this.panel || this.catalogStatus === 'loading') return;
+    const requestId = ++this.catalogRequestId;
+    this.catalogStatus = 'loading';
+    this.catalogMessage = undefined;
+    if (this.latestState) {
+      await this.postState({ ...this.latestState, catalogStatus: 'loading', catalogMessage: undefined });
+    }
+    try {
+      if (force) await this.provider.refreshModels();
+      const next = await this.state(!force);
+      if (!this.panel || requestId !== this.catalogRequestId) return;
+      this.catalogStatus = next.loadedFromQoder ? 'loaded' : 'error';
+      this.catalogMessage = next.loadedFromQoder
+        ? '目录已更新'
+        : !next.patConfigured ? '请先配置 Qoder PAT'
+          : !next.workspace ? '请先打开一个工作区'
+            : '目录读取失败，当前显示备用模型，可重试';
+      const previous = this.latestState;
+      await this.postState({
+        ...next,
+        catalogStatus: this.catalogStatus,
+        catalogMessage: this.catalogMessage,
+        usageStatus: previous?.usageStatus ?? next.usageStatus,
+        usageMessage: previous?.usageMessage,
+        usageUpdatedAt: previous?.usageUpdatedAt,
+        usage: previous?.usage,
+      });
+    } catch (error) {
+      if (!this.panel || requestId !== this.catalogRequestId) return;
+      this.catalogStatus = 'error';
+      this.catalogMessage = error instanceof Error ? error.message : String(error);
+      await this.sendState(false);
     }
   }
 
@@ -464,26 +540,7 @@ export class QoderControlCenter implements vscode.Disposable {
 
     // Paint whichever request finishes first. A slow catalog refresh must not
     // delay a completed usage response, and vice versa.
-    void this.state(options.refreshCatalog).then(async (nextState) => {
-      if (!isCurrent()) {
-        return;
-      }
-      const usageState = this.latestState ?? current;
-      await this.postState({
-        ...nextState,
-        usageStatus: usageState.usageStatus,
-        usageMessage: usageState.usageMessage,
-        usageUpdatedAt: usageState.usageUpdatedAt,
-        usage: usageState.usage,
-      });
-    }).catch(async (error: unknown) => {
-      if (isCurrent()) {
-        await this.panel?.webview.postMessage({
-          type: 'error',
-          message: error instanceof Error ? error.message : String(error),
-        });
-      }
-    });
+    if (options.refreshCatalog) void this.refreshCatalog(false);
 
     try {
       const usage = await this.provider.fetchUsage(pat, cwd, {
@@ -530,9 +587,11 @@ export class QoderControlCenter implements vscode.Disposable {
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Qoder Control Center</title>
   <style>
-    :root { color-scheme: dark; --bg: #0f1117; --panel: #171b24; --panel-2: #1d2430; --line: #2a3443; --muted: #9aa7ba; --text: #e8edf5; --accent: #4da3ff; --good: #5bd49a; --warn: #f4b860; }
+    :root { --bg: var(--vscode-editor-background, #1e1e1e); --panel: var(--vscode-sideBar-background, #252526); --panel-2: var(--vscode-input-background, #3c3c3c); --line: var(--vscode-widget-border, var(--vscode-panel-border, #454545)); --muted: var(--vscode-descriptionForeground, #a6a6a6); --text: var(--vscode-foreground, #cccccc); --accent: var(--vscode-focusBorder, #007fd4); --good: var(--vscode-testing-iconPassed, #4caf50); --warn: var(--vscode-editorWarning-foreground, #cca700); }
     * { box-sizing: border-box; }
-    body { margin: 0; padding: 16px 20px 28px; background: var(--bg); color: var(--text); font: 12px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+    body { color-scheme: dark; margin: 0; padding: 16px 20px 28px; background: var(--bg); color: var(--text); font: 12px/1.45 var(--vscode-font-family, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif); }
+    body.vscode-light, body.vscode-high-contrast-light { color-scheme: light; }
+    body.vscode-high-contrast, body.vscode-high-contrast-light { --line: var(--vscode-contrastBorder, var(--text)); }
     .shell { max-width: 1500px; margin: 0 auto; }
     header { display: flex; align-items: center; justify-content: space-between; gap: 14px; margin-bottom: 14px; }
     h1 { margin: 0 0 2px; font-size: 19px; letter-spacing: -0.02em; }
@@ -544,8 +603,12 @@ export class QoderControlCenter implements vscode.Disposable {
     button, select, input { color: var(--text); background: var(--panel-2); border: 1px solid var(--line); border-radius: 7px; padding: 5px 8px; font: inherit; }
     button { cursor: pointer; }
     button:hover { border-color: var(--accent); }
-    button.primary { background: #1f6fbd; border-color: #358edc; }
-    button.danger { color: #ffb7b7; }
+    button.primary { background: var(--vscode-button-background, #0e639c); color: var(--vscode-button-foreground, #fff); border-color: var(--vscode-contrastBorder, transparent); }
+    button.primary:hover { background: var(--vscode-button-hoverBackground, #1177bb); }
+    button.danger { color: var(--vscode-errorForeground, #f48771); }
+    button:disabled { cursor: wait; opacity: .7; }
+    button:focus-visible, input:focus-visible, select:focus-visible { outline: 1px solid var(--accent); outline-offset: 2px; }
+    input[type=checkbox] { accent-color: var(--vscode-checkbox-selectBackground, var(--accent)); }
     select { min-width: 145px; }
     input[type=number] { width: 110px; }
     input[type=search] { width: 220px; }
@@ -559,38 +622,40 @@ export class QoderControlCenter implements vscode.Disposable {
     .section { padding: 12px 14px; margin-bottom: 12px; }
     .section-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 10px; }
     .settings { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 6px 18px; }
-    .setting { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 6px 0; border-bottom: 1px solid #242c38; }
+    .setting { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 6px 0; border-bottom: 1px solid var(--line); }
     .setting:last-child { border-bottom: 0; }
     .setting label { font-weight: 600; }
     .setting small { display: block; color: var(--muted); font-weight: 400; margin-top: 1px; }
     .models { display: grid; grid-template-columns: repeat(auto-fit, minmax(360px, 1fr)); gap: 12px; align-items: start; }
-    .model { align-self: start; padding: 14px; border: 1px solid var(--line); border-radius: 10px; background: #151a22; transition: border-color .16s ease, background-color .16s ease; }
-    .model:hover { border-color: #3d6790; background: #171d27; }
+    .model { align-self: start; padding: 14px; border: 1px solid var(--line); border-radius: 10px; background: var(--bg); transition: border-color .16s ease; }
+    .model:hover { border-color: var(--accent); }
     .model-title { display: flex; justify-content: space-between; gap: 12px; align-items: flex-start; }
     .model-heading { display: flex; align-items: baseline; gap: 9px; min-width: 0; flex-wrap: wrap; }
     .model-name { font-size: 16px; line-height: 1.2; font-weight: 650; letter-spacing: -0.01em; }
     .model-id { color: var(--muted); font: 11px ui-monospace, SFMono-Regular, Menlo, monospace; overflow-wrap: anywhere; }
-    .model-status { flex: 0 0 auto; padding: 3px 7px; border: 1px solid #2b6c56; border-radius: 6px; background: #173b31; color: #8ce0b6; font-size: 10px; white-space: nowrap; }
-    .model-meta { display: flex; flex-wrap: wrap; gap: 5px 14px; margin-top: 11px; padding-top: 10px; border-top: 1px solid #242c38; color: var(--muted); font-size: 11px; }
+    .model-status { flex: 0 0 auto; padding: 3px 7px; border: 1px solid var(--good); border-radius: 6px; color: var(--text); font-size: 10px; white-space: nowrap; }
+    .model-meta { display: flex; flex-wrap: wrap; gap: 5px 14px; margin-top: 11px; padding-top: 10px; border-top: 1px solid var(--line); color: var(--muted); font-size: 11px; }
     .model-meta span { white-space: nowrap; }
     .model-meta strong { color: var(--text); font-weight: 600; }
-    .model-controls { display: grid; grid-template-columns: minmax(0, 1.15fr) minmax(0, 1fr); gap: 9px; margin-top: 12px; padding-top: 11px; border-top: 1px solid #242c38; }
+    .model-controls { display: grid; grid-template-columns: minmax(0, 1.15fr) minmax(0, 1fr); gap: 9px; margin-top: 12px; padding-top: 11px; border-top: 1px solid var(--line); }
     .model-controls.single { grid-template-columns: minmax(0, 1fr); }
     .model-control { display: grid; gap: 5px; color: var(--muted); font-size: 10px; }
     .model-control > span { letter-spacing: .01em; }
     .model-control select { width: 100%; min-width: 0; min-height: 30px; padding: 5px 8px; color: var(--text); }
     .model-control select:disabled { opacity: .7; cursor: not-allowed; }
     .model-footer { display: flex; justify-content: space-between; gap: 8px; margin-top: 10px; color: var(--muted); font-size: 10px; }
-    .model-footer span:last-child { color: #b4c0d0; }
     .empty { padding: 16px; text-align: center; color: var(--muted); border: 1px dashed var(--line); border-radius: 8px; }
-    .notice { padding: 8px 10px; border-radius: 8px; background: #202c3b; color: #c8dfff; margin-bottom: 10px; }
-    .notice.warn { background: #3d3020; color: #ffda98; }
+    .notice { padding: 8px 10px; border: 1px solid var(--line); border-radius: 8px; background: var(--panel); color: var(--text); margin-bottom: 10px; }
+    .notice.warn { border-color: var(--warn); }
+    #feedback { font-size: 11px; }
+    .catalog-state { color: var(--muted); margin-bottom: 8px; font-size: 11px; }
+    .catalog-state.warn { color: var(--warn); }
     .usage-layout { display: grid; gap: 7px; }
     .usage-topline { display: flex; align-items: baseline; justify-content: space-between; gap: 14px; flex-wrap: wrap; }
     .usage-label { color: var(--muted); font-size: 11px; }
     .usage-stats, .usage-meta { display: flex; align-items: center; justify-content: flex-end; gap: 14px; flex-wrap: wrap; }
     .usage-stats strong, .usage-meta strong { color: var(--good); }
-    .usage-progress { height: 7px; margin: 1px 0 2px; background: #29313d; border-radius: 99px; overflow: hidden; }
+    .usage-progress { height: 7px; margin: 1px 0 2px; background: var(--line); border-radius: 99px; overflow: hidden; }
     .usage-progress span { display: block; height: 100%; background: var(--good); border-radius: inherit; }
     .usage-meta { color: var(--muted); font-size: 11px; }
     .usage-actions { display: inline-flex; align-items: center; gap: 8px; }
@@ -598,9 +663,10 @@ export class QoderControlCenter implements vscode.Disposable {
     .usage-state.good { color: var(--good); }
     .usage-state.warn { color: var(--warn); }
     .usage-refresh[disabled] { cursor: wait; opacity: .75; }
-    .spinner { width: 10px; height: 10px; display: inline-block; border: 2px solid #526071; border-top-color: var(--accent); border-radius: 50%; animation: qoder-spin .8s linear infinite; vertical-align: -1px; }
+    .spinner { width: 10px; height: 10px; display: inline-block; border: 2px solid var(--line); border-top-color: var(--accent); border-radius: 50%; animation: qoder-spin .8s linear infinite; vertical-align: -1px; }
     @keyframes qoder-spin { to { transform: rotate(360deg); } }
-    .repo-link { padding: 0; border: 0; background: transparent; color: #9ecbff; font-size: 11px; }
+    @media (prefers-reduced-motion: reduce) { .spinner { animation: none; } .model { transition: none; } }
+    .repo-link { padding: 0; border: 0; background: transparent; color: var(--vscode-textLink-foreground, #3794ff); font-size: 11px; }
     .repo-link:hover { color: var(--text); border: 0; }
     .usage-empty { color: var(--muted); }
     @media (max-width: 900px) { body { padding: 14px; } .grid, .settings { grid-template-columns: 1fr 1fr; } .usage-topline { align-items: flex-start; flex-direction: column; gap: 5px; } .usage-stats, .usage-meta { justify-content: flex-start; } }
@@ -620,12 +686,23 @@ export class QoderControlCenter implements vscode.Disposable {
         <button data-action="openSettings">VS Code 设置</button>
       </div>
     </header>
+    <div id="feedback" role="status" aria-live="polite" hidden></div>
     <div id="app"><div class="empty">正在读取 Qoder 状态…</div></div>
   </main>
   <script nonce="${pageNonce}">
     const vscode = acquireVsCodeApi();
     let currentState;
     let query = '';
+    const feedback = (message, error = false) => {
+      const element = document.getElementById('feedback');
+      element.textContent = message;
+      element.className = error ? 'notice warn' : 'notice';
+      element.hidden = !message;
+    };
+    const catalogButtons = (loading) => document.querySelectorAll('[data-action="refreshModels"]').forEach((button) => {
+      button.disabled = loading;
+      button.textContent = loading ? '刷新中…' : (button.classList?.contains('primary') ? '刷新模型目录' : '刷新');
+    });
     const escapeHtml = (value) => String(value ?? '').replace(/[&<>"']/g, (c) => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
     const tokenLabel = (value) => {
       if (value === undefined || value === null) return '未提供';
@@ -727,9 +804,17 @@ export class QoderControlCenter implements vscode.Disposable {
         return !query || haystack.includes(query.toLowerCase());
       });
       const totalModels = (state.models || []).length;
+      const verified = state.patConfigured && state.loadedFromQoder && state.catalogStatus !== 'error';
+      const connectionLabel = !state.patConfigured ? '未配置'
+        : state.catalogStatus === 'loading' ? '验证中…'
+          : verified ? '已验证'
+            : state.catalogStatus === 'error' ? '连接未验证' : 'PAT 已配置';
+      const active = document.activeElement;
+      const focusedSearch = active?.dataset?.search === 'models';
+      const selection = focusedSearch ? [active.selectionStart, active.selectionEnd] : undefined;
       document.getElementById('app').innerHTML =
         '<div class="grid">' +
-          '<div class="card"><div class="muted">连接</div><div class="metric"><span class="dot ' + (state.patConfigured ? 'good' : '') + '"></span> ' + (state.patConfigured ? '已连接' : '未配置') + '</div></div>' +
+          '<div class="card"><div class="muted">连接</div><div class="metric"><span class="dot ' + (verified ? 'good' : '') + '"></span> ' + connectionLabel + '</div></div>' +
           '<div class="card"><div class="muted">模型</div><div class="metric">' + totalModels + ' 个</div></div>' +
           '<div class="card"><div class="muted">原生工具</div><div class="metric">' + (config.nativeToolLoop ? '已启用' : '已关闭') + '</div></div>' +
           '<div class="card"><div class="muted">版本</div><div class="metric">' + escapeHtml(state.extensionVersion) + '</div></div>' +
@@ -748,29 +833,41 @@ export class QoderControlCenter implements vscode.Disposable {
         '</section>' +
         '<section class="section"><div class="section-head"><h2>用量</h2><div class="usage-actions">' + usageStateLabel + '<button class="usage-refresh" data-action="refreshUsage"' + (usageLoading ? ' disabled' : '') + '>' + usageButtonLabel + '</button></div></div>' + usageMarkup(state) + '</section>' +
         '<section class="section"><div class="section-head"><div><h2>模型目录</h2><div class="subtitle">上下文窗口和推理强度在每张模型卡内单独设置。</div></div><div class="actions"><button data-action="refreshModels">刷新</button><input type="search" placeholder="搜索名称或 ID" value="' + escapeHtml(query) + '" data-search="models" /></div></div>' +
+          (state.catalogStatus === 'loading' ? '<div class="catalog-state" role="status"><span class="spinner"></span> 正在读取模型目录…</div>' : state.catalogMessage ? '<div role="status" class="catalog-state' + (state.catalogStatus === 'error' ? ' warn' : '') + '">' + escapeHtml(state.catalogMessage) + '</div>' : '') +
           (models.length ? '<div class="models">' + models.map(renderModel).join('') + '</div>' : '<div class="empty">没有匹配的模型。</div>') +
         '</section>';
+      catalogButtons(state.catalogStatus === 'loading');
+      if (focusedSearch) {
+        const search = document.querySelector('[data-search="models"]');
+        search?.focus();
+        if (selection) search?.setSelectionRange(...selection);
+      }
     }
     document.addEventListener('click', (event) => {
       const target = event.target.closest('[data-action]');
-      if (!target) return;
+      if (!target || target.disabled) return;
       event.preventDefault();
       if (target.dataset.action === 'refreshUsage') {
         target.disabled = true;
         target.textContent = '读取中…';
       }
+      if (target.dataset.action === 'refreshModels') catalogButtons(true);
       vscode.postMessage({ type: target.dataset.action });
     });
     document.addEventListener('change', (event) => {
       const target = event.target.closest('[data-model-setting]');
       if (!target) return;
-      modelSetting(target.dataset.modelId, target.dataset.modelSetting, target.value);
+      const value = target.dataset.modelSetting === 'contextWindow' && target.value !== '__model_default__'
+        ? Number(target.value) : target.value;
+      feedback('正在保存…');
+      modelSetting(target.dataset.modelId, target.dataset.modelSetting, value);
     });
     document.addEventListener('change', (event) => {
       const target = event.target.closest('[data-setting]');
       if (!target) return;
       const key = target.dataset.setting;
       const value = target.type === 'checkbox' ? target.checked : (target.type === 'number' ? Number(target.value) : target.value);
+      feedback('正在保存…');
       setting(key, value);
     });
     document.addEventListener('input', (event) => {
@@ -789,7 +886,8 @@ export class QoderControlCenter implements vscode.Disposable {
     });
     window.addEventListener('message', (event) => {
       if (event.data?.type === 'state') render(event.data.state);
-      if (event.data?.type === 'error') document.getElementById('app').innerHTML = '<div class="notice warn">读取失败：' + escapeHtml(event.data.message) + '</div>';
+      if (event.data?.type === 'saved') feedback('已保存到用户设置');
+      if (event.data?.type === 'error') { feedback(event.data.message, true); catalogButtons(false); }
     });
     vscode.postMessage({ type: 'ready' });
   </script>

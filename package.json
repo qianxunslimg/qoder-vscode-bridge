@@ -2,8 +2,9 @@
   "name": "qoder-vscode-bridge",
   "displayName": "Qoder Team Bridge for VS Code Chat",
   "description": "An independent VS Code companion for Qoder Team and business accounts, bringing Qoder models to VS Code Chat where the official Qoder plugin is unavailable.",
-  "version": "1.0.3",
+  "version": "1.0.4",
   "publisher": "qianxunslimg",
+  "icon": "media/icon.png",
   "license": "MIT",
   "repository": {
     "type": "git",

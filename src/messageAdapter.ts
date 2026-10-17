@@ -163,26 +163,25 @@ export function messagesToPrompt(
 ): QoderPromptInput {
   const images: QoderImageContentBlock[] = [];
   const latestUserIndex = latestUserMessageIndex(messages);
-  const transcript = compactPromptEntries(
-    messages.map((message, index) =>
-      messageToPromptEntry(
-        message,
-        images,
-        options,
-        index === latestUserIndex,
-      ),
+  const entries = messages.map((message, index) =>
+    messageToPromptEntry(
+      message,
+      images,
+      options,
+      index === latestUserIndex,
     ),
-    options.maxPromptChars,
-  )
+  );
+  const transcript = compactPromptEntries(entries, options.maxPromptChars)
     .map((entry) => `[${entry.label}]\n${entry.text}`)
     .join('\n\n');
   const activeEditorReference = options.activeEditorReference
     ? renderActiveEditorReference(options.activeEditorReference, options)
     : undefined;
+  const currentUserText = entries[latestUserIndex]?.text ?? '';
   const hasExplicitReference =
-    transcript.includes('[Attached file reference]') ||
-    transcript.includes('[Attached text reference]') ||
-    transcript.includes('[Selected content]');
+    currentUserText.includes('[Attached file reference]') ||
+    currentUserText.includes('[Attached text reference]') ||
+    currentUserText.includes('[Selected content]');
   const text = [
     'You are Qoder, responding through a VS Code language model provider.',
     'Answer greetings and ordinary conversation directly without inspecting the workspace.',

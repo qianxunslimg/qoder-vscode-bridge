@@ -330,3 +330,23 @@ test('includes the active editor selection when VS Code drops reference metadata
   assert.match(prompt, /lines 7-12/);
   assert.match(prompt, /tsconfig\.json/);
 });
+
+test('historical references do not suppress the current editor selection', () => {
+  const older = {
+    role: vscode.LanguageModelChatMessageRole.User,
+    content: [new vscode.LanguageModelDataPart(Buffer.from('file:///workspace/old.cpp'), 'text/uri-list')],
+  };
+  const current = {
+    role: vscode.LanguageModelChatMessageRole.User,
+    content: [new vscode.LanguageModelTextPart('看看当前选中的代码')],
+  };
+  const options = { activeEditorReference: {
+    resource: '/workspace/current.cpp', range: 'lines 4-8', text: 'CURRENT_SELECTION',
+  } };
+  const prompt = messagesToPrompt([older, current], options);
+  assert.match(prompt, /CURRENT_SELECTION/);
+  assert.match(prompt, /\/workspace\/current\.cpp/);
+
+  const explicit = messagesToPrompt([current, older], options);
+  assert.doesNotMatch(explicit, /CURRENT_SELECTION/);
+});

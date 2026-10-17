@@ -3,6 +3,18 @@ import test from 'node:test';
 
 import { usageSnapshotFromInfo } from '../out/usagePresentation.js';
 
+test('derives usage percentages from balances without guessing the unit', () => {
+  for (const percentage of [1, 0.01, 100, undefined]) {
+    const snapshot = usageSnapshotFromInfo({
+      userType: 'enterprise',
+      orgResourcePackage: { cap: 10_000, used: 100, remaining: 9_900, percentage },
+    });
+    assert.equal(snapshot.primary.percentage, 1);
+  }
+  const fractional = usageSnapshotFromInfo({ userQuota: { percentage: 0.5 } });
+  assert.equal(fractional.primary.percentage, 0.5);
+});
+
 test('prefers the enterprise resource package over an empty personal quota', () => {
   const snapshot = usageSnapshotFromInfo({
     userType: 'enterprise',

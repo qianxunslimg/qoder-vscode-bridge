@@ -4,7 +4,16 @@
 
 [English](README.en.md) · [Releases](https://github.com/qianxunslimg/qoder-vscode-bridge/releases)
 
-![Qoder model catalog](docs/images/model-catalog.png)
+<table>
+  <tr>
+    <th width="39%">VS Code Chat</th>
+    <th width="61%">插件配置</th>
+  </tr>
+  <tr>
+    <td valign="top"><img src="docs/images/qoder-team-chat.png" alt="在 VS Code Chat 中使用 Qoder Team 模型" width="100%"></td>
+    <td valign="top"><img src="docs/images/model-catalog.png" alt="Qoder 控制中心：插件配置与模型设置" width="100%"></td>
+  </tr>
+</table>
 
 ## 安装
 

@@ -52,6 +52,7 @@ module.exports = {
   LanguageModelToolResult,
   MarkdownString,
   EventEmitter,
+  ConfigurationTarget: { Global: 1, Workspace: 2, WorkspaceFolder: 3 },
   LanguageModelChatMessageRole: { User: 1, Assistant: 2 },
   workspace: {
     isTrusted: true,

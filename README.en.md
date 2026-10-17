@@ -4,7 +4,16 @@ Connect enterprise Qoder to VS Code's native Chat. Install the extension, choose
 
 [中文](README.md) · [Releases](https://github.com/qianxunslimg/qoder-vscode-bridge/releases)
 
-![Qoder model catalog](docs/images/model-catalog.png)
+<table>
+  <tr>
+    <th width="39%">VS Code Chat</th>
+    <th width="61%">Extension settings</th>
+  </tr>
+  <tr>
+    <td valign="top"><img src="docs/images/qoder-team-chat.png" alt="Using Qoder Team models in VS Code Chat" width="100%"></td>
+    <td valign="top"><img src="docs/images/model-catalog.png" alt="Qoder Control Center: extension configuration and model settings" width="100%"></td>
+  </tr>
+</table>
 
 ## Installation
 

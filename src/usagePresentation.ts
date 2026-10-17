@@ -38,15 +38,11 @@ function percentage(
   used: number | undefined,
   total: number | undefined,
 ): number | undefined {
-  const explicit = finite(value);
-  if (explicit !== undefined) {
-    // Some Qoder endpoints use 0..1 while the account endpoint uses 0..100.
-    return Math.max(0, Math.min(100, explicit <= 1 ? explicit * 100 : explicit));
-  }
   if (used !== undefined && total !== undefined && total > 0) {
     return Math.max(0, Math.min(100, (used / total) * 100));
   }
-  return undefined;
+  const explicit = finite(value);
+  return explicit === undefined ? undefined : Math.max(0, Math.min(100, explicit));
 }
 
 function bucket(

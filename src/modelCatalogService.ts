@@ -11,6 +11,12 @@ import { holdSessionOpen } from './sdkSession.js';
 // waiting behind the SDK's much longer general-purpose control timeout.
 const METADATA_CONTROL_REQUEST_TIMEOUT_MS = 15_000;
 
+interface MetadataConnection {
+  readonly key: string;
+  readonly session: Query;
+  ready: Promise<Query>;
+}
+
 /**
  * A metadata-only Qoder session that stays open while the extension is alive.
  *
@@ -19,9 +25,8 @@ const METADATA_CONTROL_REQUEST_TIMEOUT_MS = 15_000;
  * lifecycle gap and also makes model refreshes cheap.
  */
 export class QoderMetadataSession {
-  private querySession: Query | undefined;
-  private sessionKey: string | undefined;
-  private opening: Promise<Query> | undefined;
+  private connection: MetadataConnection | undefined;
+  private readonly closedSessions = new WeakSet<Query>();
 
   public async getAvailableModels(
     pat: string,
@@ -31,7 +36,7 @@ export class QoderMetadataSession {
     try {
       return await session.getAvailableModels({ fetchStrategy: 'live' });
     } catch (error) {
-      await this.close();
+      this.closeSession(session);
       throw error;
     }
   }
@@ -44,49 +49,37 @@ export class QoderMetadataSession {
     try {
       return await session.getUsageInfo();
     } catch (error) {
-      await this.close();
+      this.closeSession(session);
       throw error;
     }
   }
 
   public async close(): Promise<void> {
-    const session = this.querySession;
-    this.querySession = undefined;
-    this.sessionKey = undefined;
+    const session = this.connection?.session;
+    this.connection = undefined;
     if (session) {
-      await session.close().catch(() => undefined);
+      this.closeSession(session);
     }
   }
 
-  private async ensureSession(pat: string, cwd: string): Promise<Query> {
-    const nextKey = `${cwd}\u0000${pat}`;
-    if (this.querySession && this.sessionKey === nextKey) {
-      return this.querySession;
+  private closeSession(session: Query): void {
+    if (this.connection?.session === session) {
+      this.connection = undefined;
     }
-
-    if (this.opening) {
-      const session = await this.opening;
-      if (this.sessionKey === nextKey) {
-        return session;
-      }
-    }
-
-    await this.close();
-    const opening = this.openSession(pat, cwd);
-    this.opening = opening;
+    if (this.closedSessions.has(session)) return;
+    this.closedSessions.add(session);
     try {
-      const session = await opening;
-      this.querySession = session;
-      this.sessionKey = nextKey;
-      return session;
-    } finally {
-      if (this.opening === opening) {
-        this.opening = undefined;
-      }
+      // Cleanup must not keep a failed metadata request pending indefinitely.
+      void session.close().catch(() => undefined);
+    } catch {
+      // The connection is already invalidated even if SDK cleanup fails.
     }
   }
 
-  private async openSession(pat: string, cwd: string): Promise<Query> {
+  private ensureSession(pat: string, cwd: string): Promise<Query> {
+    const key = `${cwd}\u0000${pat}`;
+    if (this.connection?.key === key) return this.connection.ready;
+    void this.close();
     const session = query({
       prompt: holdSessionOpen(),
       options: {
@@ -96,13 +89,26 @@ export class QoderMetadataSession {
         controlRequestTimeoutMs: METADATA_CONTROL_REQUEST_TIMEOUT_MS,
       },
     });
-    try {
-      await session.initializationResult();
-      return session;
-    } catch (error) {
-      await session.close().catch(() => undefined);
-      throw error;
-    }
+    const connection: MetadataConnection = {
+      key,
+      session,
+      ready: Promise.resolve(session),
+    };
+    // Publish the in-flight connection before the first asynchronous boundary.
+    this.connection = connection;
+    connection.ready = Promise.resolve()
+      .then(() => session.initializationResult())
+      .then(() => {
+        if (this.connection !== connection) {
+          throw new Error('Qoder metadata session closed or account changed.');
+        }
+        return session;
+      })
+      .catch((error: unknown) => {
+        this.closeSession(session);
+        throw error;
+      });
+    return connection.ready;
   }
 }
 
